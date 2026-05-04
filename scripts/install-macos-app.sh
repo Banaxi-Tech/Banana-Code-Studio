@@ -88,6 +88,7 @@ run_as_needed rm -rf "${TARGET_PATH}"
 run_as_needed ditto "${APP_PATH}" "${TARGET_PATH}"
 
 echo "Removing macOS quarantine flag from ${TARGET_PATH}..."
+echo "This may require your password."
 if ! xattr -dr com.apple.quarantine "${TARGET_PATH}" 2>/dev/null; then
   sudo xattr -dr com.apple.quarantine "${TARGET_PATH}"
 fi
