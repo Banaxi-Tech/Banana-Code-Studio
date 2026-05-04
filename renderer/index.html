@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Banana Code Studio</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="../node_modules/highlight.js/styles/github-dark.min.css">
+</head>
+<body>
+
+  <!-- ── Titlebar ── -->
+  <div class="titlebar" id="titlebar">
+    <div class="titlebar-left">
+      <div class="traffic-light traffic-close" id="btn-close" title="Close"></div>
+      <div class="traffic-light traffic-minimize" id="btn-minimize" title="Minimize"></div>
+      <div class="traffic-light traffic-maximize" id="btn-maximize" title="Maximize"></div>
+    </div>
+    <div class="titlebar-center">Banana Code Studio</div>
+    <div class="titlebar-right">
+      <div class="connection-badge disconnected" id="connection-badge">
+        <div class="connection-dot"></div>
+        <span id="connection-label">Disconnected</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── App Container ── -->
+  <div class="app-container">
+
+    <!-- ── Sidebar ── -->
+    <div class="sidebar">
+      <div class="sidebar-nav">
+        <button class="sidebar-icon-btn" type="button" title="Toggle sidebar">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M4 10h12M4 14h12"/></svg>
+        </button>
+        <button class="sidebar-icon-btn" type="button" title="Back">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg>
+        </button>
+        <button class="sidebar-icon-btn" type="button" title="Forward">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 4.5 5.5 5.5-5.5 5.5"/></svg>
+        </button>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="btn-sidebar primary" id="btn-new-chat">
+          <span class="nav-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 14.5 5 11l7.2-7.2a1.7 1.7 0 0 1 2.4 2.4L7.4 13.4 4.5 14.5Z"/><path d="M11.4 4.6 13.4 6.6"/></svg></span> New chat
+        </button>
+      </div>
+
+      <div class="sidebar-search">
+        <span class="search-icon">⌕</span>
+        <input type="text" id="search-sessions" placeholder="Search">
+      </div>
+
+      <div class="sidebar-section-heading">Projects</div>
+      <button class="project-row" id="sidebar-project-row" type="button" title="Click to change workspace">
+        <span class="project-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h5l1.5 2H17l-1.2 6H4.2L3 6.5Z"/></svg></span>
+        <span id="sidebar-project-name">No workspace</span>
+      </button>
+
+      <div class="sidebar-section-heading">Chats</div>
+      <div class="sessions-container" id="sessions-container">
+        <!-- Sessions populated dynamically -->
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="btn-settings" id="btn-open-settings">
+          <span class="nav-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/><path d="M15.5 11.2a5.8 5.8 0 0 0 0-2.4l1.4-1.1-1.5-2.5-1.7.7a6 6 0 0 0-2.1-1.2L11.4 3H8.6l-.3 1.7a6 6 0 0 0-2.1 1.2l-1.7-.7L3.1 7.7l1.4 1.1a5.8 5.8 0 0 0 0 2.4l-1.4 1.1 1.4 2.5 1.7-.7a6 6 0 0 0 2.1 1.2l.3 1.7h2.8l.3-1.7a6 6 0 0 0 2.1-1.2l1.7.7 1.5-2.5-1.5-1.1Z"/></svg></span> Settings
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Chat Area ── -->
+    <div class="chat-container">
+
+      <!-- Toolbar -->
+      <div class="chat-toolbar">
+        <div class="toolbar-spacer"></div>
+        <button class="btn-toolbar" id="btn-init" title="Generate BANANA.md">Init</button>
+        <button class="btn-toolbar" id="btn-compress" title="Compress context">Compress</button>
+        <button class="btn-toolbar" id="btn-clear" title="Clear history">Clear</button>
+      </div>
+
+      <!-- Messages -->
+      <div class="messages-container" id="messages-container">
+        <div class="empty-state" id="empty-state">
+          <h2>What should we work on?</h2>
+        </div>
+      </div>
+
+      <!-- Input Bar (Codex-style) -->
+      <div class="input-bar">
+        <div class="input-pill">
+          <div class="attachment-chips" id="attachment-chips"></div>
+          <textarea id="message-input" placeholder="Ask Banana Code anything, @ to add files, / for commands" rows="1"></textarea>
+          <div class="input-pill-footer">
+            <div class="input-pill-left">
+              <button class="composer-plus" id="btn-add-attachment" type="button" title="Add files or images">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>
+              </button>
+              <!-- Permission Mode Dropdown -->
+              <div style="position:relative;" id="mode-dropdown-container">
+                <button class="pill-btn" id="mode-trigger">
+                  <span id="mode-icon"></span>
+                  <span id="mode-label">Banana Guard</span>
+                  <span class="pill-caret">▾</span>
+                </button>
+                <div class="dropdown-panel" id="mode-panel"></div>
+              </div>
+
+              <!-- Operating Mode Dropdown -->
+              <div style="position:relative;" id="operating-mode-dropdown-container">
+                <button class="pill-btn" id="operating-mode-trigger">
+                  <span id="operating-mode-label">Agent</span>
+                  <span class="pill-caret">▾</span>
+                </button>
+                <div class="dropdown-panel" id="operating-mode-panel"></div>
+              </div>
+
+              <!-- Model Selector Dropdown -->
+              <div style="position:relative;" id="model-dropdown-container">
+                <button class="pill-btn" id="model-trigger">
+                  <span id="model-icon"></span>
+                  <span id="model-label">gemini-2.5-flash</span>
+                  <span class="pill-caret">▾</span>
+                </button>
+                <div class="dropdown-panel" id="model-panel" style="min-width:320px;"></div>
+              </div>
+              <div class="workspace-pill" id="workspace-pill" title="Click to change workspace">
+                <span class="workspace-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h5l1.5 2H17l-1.2 6H4.2L3 6.5Z"/></svg></span>
+                <span id="workspace-path">No workspace</span>
+              </div>
+            </div>
+            <div class="input-pill-right">
+              <span class="token-badge hidden" id="token-badge"></span>
+              <button class="pill-action-btn" id="btn-send" title="Send (Enter)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Permission Modal ── -->
+  <div class="modal-overlay hidden" id="permission-modal">
+    <div class="modal">
+      <div class="modal-title">Permission Request</div>
+      <div class="modal-detail-label">Action</div>
+      <div class="modal-detail" id="permission-action"></div>
+      <div class="modal-detail-label">Details</div>
+      <div class="modal-detail" id="permission-details"></div>
+      <div class="modal-actions">
+        <button class="btn-modal allow" id="btn-perm-allow">✓ Allow</button>
+        <button class="btn-modal" id="btn-perm-always" style="background:var(--accent-dim);color:var(--accent);border-color:var(--accent);">✓ Always</button>
+        <button class="btn-modal deny" id="btn-perm-deny">✗ Deny</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Settings Panel ── -->
+  <div class="settings-overlay" id="settings-overlay"></div>
+  <div class="settings-panel" id="settings-panel">
+    <aside class="settings-sidebar">
+      <div class="settings-header">
+        <button class="settings-close" id="btn-close-settings">← Back to app</button>
+      </div>
+      <div class="settings-tabs">
+        <div class="settings-tab active" data-tab="connection">Connection</div>
+        <div class="settings-tab" data-tab="provider">Provider</div>
+        <div class="settings-tab" data-tab="modes">Modes</div>
+        <div class="settings-tab" data-tab="settings">Settings</div>
+        <div class="settings-tab" data-tab="beta">Beta</div>
+        <div class="settings-tab" data-tab="bananasplit">BananaSplit</div>
+        <div class="settings-tab" data-tab="status">Status</div>
+        <div class="settings-tab" data-tab="memory">Memory</div>
+      </div>
+    </aside>
+    <main class="settings-main">
+      <h1 class="settings-page-title" id="settings-page-title">Connection</h1>
+      <div class="settings-body" id="settings-body">
+        <!-- Tab content rendered dynamically -->
+      </div>
+    </main>
+  </div>
+
+  <!-- ── Toast Container ── -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="../node_modules/marked/marked.min.js"></script>
+  <script src="../node_modules/dompurify/dist/purify.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

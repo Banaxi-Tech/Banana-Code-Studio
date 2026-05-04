@@ -1,0 +1,45 @@
+{
+  "name": "banana-code-studio",
+  "version": "0.1.0",
+  "description": "GUI for the Banana Code AI coding assistant",
+  "homepage": "https://bananacode.sh",
+  "author": {
+    "name": "BanaxiTech",
+    "email": "banaxitech@gmail.com"
+  },
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "marked": "^12.0.0",
+    "highlight.js": "^11.9.0",
+    "dompurify": "^3.1.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.bananacode.studio",
+    "productName": "Banana Code Studio",
+    "icon": "assets/banana.png",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "zip"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ],
+      "maintainer": "BanaxiTech <banaxitech@gmail.com>"
+    }
+  }
+}

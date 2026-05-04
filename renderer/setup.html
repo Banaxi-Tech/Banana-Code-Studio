@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Banana Code Studio — Setup</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="setup-container">
+
+    <!-- Step 1: Welcome -->
+    <section id="step-welcome" class="setup-step active">
+      <div class="setup-logo">🍌</div>
+      <h1 class="setup-title">Welcome to Banana Code Studio</h1>
+      <p class="setup-subtitle">A powerful GUI for the Banana Code AI coding assistant. Let's get you configured.</p>
+      <button id="btn-get-started" class="btn-setup">Get Started →</button>
+    </section>
+
+    <!-- Step 2: Server Connection -->
+    <section id="step-connection" class="setup-step">
+      <h1 class="setup-title">Connect to Banana Code API</h1>
+      <p class="setup-subtitle">Enter the connection details for your running Banana Code server.</p>
+      <div class="setup-form">
+        <div class="setup-field">
+          <label for="server-url">Server URL</label>
+          <input type="text" id="server-url" value="ws://127.0.0.1:3000" placeholder="ws://127.0.0.1:3000">
+        </div>
+        <div class="setup-field">
+          <label for="api-token">API Token</label>
+          <div class="password-wrapper">
+            <input type="password" id="api-token" placeholder="Paste your API token here">
+            <button class="password-toggle" id="toggle-token" type="button">👁️</button>
+          </div>
+          <p class="setup-help">
+            Start Banana Code with <code>banana --api</code> to launch the server.<br>
+            Your token is in <code>~/.config/banana-code/token.json</code>.
+          </p>
+        </div>
+        <div id="auto-token-info" style="display:none">
+          <div class="test-result success">✓ Token auto-detected from local config</div>
+        </div>
+        <div id="test-result-container"></div>
+      </div>
+      <div style="display:flex; gap:10px;">
+        <button id="btn-test-connection" class="btn-setup" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border)">Test Connection</button>
+        <button id="btn-continue-connect" class="btn-setup" disabled>Continue →</button>
+      </div>
+    </section>
+
+    <!-- Step 3: Provider Setup (conditional) -->
+    <section id="step-provider" class="setup-step">
+      <h1 class="setup-title">Choose Your AI Provider</h1>
+      <p class="setup-subtitle">Select a provider and configure API access for your AI coding assistant.</p>
+      <div class="setup-form">
+        <div class="provider-grid" id="provider-grid"></div>
+        <div id="provider-form-container" class="provider-form" style="display:none"></div>
+      </div>
+      <button id="btn-save-provider" class="btn-setup" disabled>Save & Finish →</button>
+    </section>
+
+    <!-- Step 4: Done -->
+    <section id="step-done" class="setup-step">
+      <div class="setup-checkmark">✅</div>
+      <h1 class="setup-title">You're all peeled and ready! 🍌</h1>
+      <p class="setup-subtitle">Your Banana Code Studio is configured and connected. Time to code!</p>
+      <button id="btn-open-studio" class="btn-setup">Open Banana Code Studio</button>
+    </section>
+
+  </div>
+
+  <div class="toast-container" id="toast-container"></div>
+
+  <script type="module" src="setup.js"></script>
+</body>
+</html>
