@@ -25,6 +25,18 @@ with AI coding sessions.
 npm install
 ```
 
+## macOS Source Installer
+
+To build an unsigned `.app` from source on macOS, install it into
+`/Applications`, and remove the quarantine flag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Banaxi-Tech/Banana-Code-Studio/main/scripts/install-macos-app.sh | bash
+```
+
+This requires Node.js, npm, and git on the Mac. The script builds for the
+current Mac architecture, either Apple Silicon (`arm64`) or Intel (`x64`).
+
 ## Run In Development
 
 ```bash
