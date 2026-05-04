@@ -4,9 +4,15 @@
 
 import { WSClient } from './ws-client.js';
 import { PROVIDERS, PROVIDER_MODELS, PERMISSION_MODES, OPERATING_MODES, REASONING_LEVELS, providerLogoHtml, iconHtml } from './constants.js';
+import { marked } from '../node_modules/marked/lib/marked.esm.js';
+import DOMPurify from '../node_modules/dompurify/dist/purify.es.mjs';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
+
+window.marked = marked;
+window.DOMPurify = DOMPurify;
+marked.setOptions({ breaks: true, gfm: true });
 
 // ── App State ──
 const state = {

@@ -73,7 +73,7 @@ fi
 cd "${SOURCE_DIR}"
 
 echo "Installing dependencies..."
-npm ci
+npm ci --include=dev
 
 echo "Compiling unsigned .app bundle..."
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dir "--${ELECTRON_ARCH}" --publish never
