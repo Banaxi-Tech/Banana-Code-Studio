@@ -2,41 +2,16 @@
 // Banana Code Studio — Markdown Renderer
 // ═══════════════════════════════════════════════════════════
 
-let marked, hljs, DOMPurify;
+import { marked } from '../node_modules/marked/lib/marked.esm.js';
+import DOMPurify from '../node_modules/dompurify/dist/purify.es.mjs';
 
 export async function initMarkdown() {
-  // Load dependencies from node_modules
-  const markedMod = await import('../node_modules/marked/lib/marked.esm.js');
-  marked = markedMod.marked;
-
-  // highlight.js and DOMPurify need to be loaded via script tags since they
-  // don't always play nice with ESM in Electron renderer
-  await loadScript('../node_modules/highlight.js/lib/index.js');
-  await loadScript('../node_modules/dompurify/dist/purify.min.js');
-
-  hljs = window.hljs;
-  DOMPurify = window.DOMPurify;
-
-  // Configure marked
   marked.setOptions({
     breaks: true,
     gfm: true,
   });
-}
-
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    // Check if already loaded
-    if (document.querySelector(`script[src="${src}"]`)) {
-      resolve();
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = src;
-    script.onload = resolve;
-    script.onerror = reject;
-    document.head.appendChild(script);
-  });
+  window.marked = marked;
+  window.DOMPurify = DOMPurify;
 }
 
 /**
@@ -56,13 +31,13 @@ export function renderMarkdown(text) {
     /<pre><code class="language-(\w+)">([\s\S]*?)<\/code><\/pre>/g,
     (match, lang, code) => {
       let highlighted = code;
-      if (hljs) {
+      if (window.hljs) {
         try {
-          highlighted = hljs.highlight(decodeHtmlEntities(code), { language: lang, ignoreIllegals: true }).value;
+          highlighted = window.hljs.highlight(decodeHtmlEntities(code), { language: lang, ignoreIllegals: true }).value;
         } catch (e) {
           // If language not found, try auto-detection
           try {
-            highlighted = hljs.highlightAuto(decodeHtmlEntities(code)).value;
+            highlighted = window.hljs.highlightAuto(decodeHtmlEntities(code)).value;
           } catch (e2) {}
         }
       }
@@ -75,9 +50,9 @@ export function renderMarkdown(text) {
     /<pre><code>([\s\S]*?)<\/code><\/pre>/g,
     (match, code) => {
       let highlighted = code;
-      if (hljs) {
+      if (window.hljs) {
         try {
-          const result = hljs.highlightAuto(decodeHtmlEntities(code));
+          const result = window.hljs.highlightAuto(decodeHtmlEntities(code));
           highlighted = result.value;
         } catch (e) {}
       }
