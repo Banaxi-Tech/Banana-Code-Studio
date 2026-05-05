@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -284,6 +284,18 @@ ipcMain.handle('navigate-to-main', () => {
 // ── App Lifecycle ──
 
 app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission === 'media' && details?.mediaTypes?.includes('audio')) {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
+
+  if (process.platform === 'darwin') {
+    await systemPreferences.askForMediaAccess('microphone').catch(() => false);
+  }
+
   await startBananaApiServerIfAvailable();
   createWindow();
 });

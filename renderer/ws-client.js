@@ -35,6 +35,42 @@ export class WSClient {
     }
   }
 
+  getHttpBaseUrl() {
+    if (!this.url) return null;
+    return this.url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
+  }
+
+  async sendVoice(audioBlob, { text = '', fileName = 'voice.wav' } = {}) {
+    const httpUrl = this.getHttpBaseUrl();
+    if (!httpUrl) throw new Error('Not connected to Banana Code API');
+
+    const form = new FormData();
+    form.append('file', audioBlob, fileName);
+    if (text.trim()) form.append('text', text.trim());
+
+    const url = new URL('/api/voice', httpUrl);
+    if (this.token) url.searchParams.set('token', this.token);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      body: form,
+    });
+
+    const bodyText = await response.text();
+    let payload = {};
+    try {
+      payload = bodyText ? JSON.parse(bodyText) : {};
+    } catch {
+      payload = { error: bodyText };
+    }
+
+    if (!response.ok) {
+      throw new Error(payload?.error || response.statusText || 'Voice transcription failed');
+    }
+
+    return payload;
+  }
+
   setState(newState) {
     if (this.state !== newState) {
       this.state = newState;
@@ -126,7 +162,7 @@ export class WSClient {
         break;
 
       case 'done':
-        this.emit('done', { finalResponse: data.finalResponse, usage: data.usage });
+        this.emit('done', { finalResponse: data.finalResponse, usage: data.usage, sessionId: data.sessionId });
         break;
 
       case 'permission_requested':

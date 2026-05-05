@@ -9,6 +9,14 @@ import DOMPurify from '../node_modules/dompurify/dist/purify.es.mjs';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
+const RECENT_WORKSPACES_KEY = 'recentWorkspaces';
+const SESSION_WORKSPACES_KEY = 'sessionWorkspaces';
+const COLLAPSED_PROJECTS_KEY = 'collapsedProjects';
+const MAX_RECENT_WORKSPACES = 8;
+const VOICE_MODELS = [
+  { value: 'whisper-large-v3-turbo', label: 'Whisper Large V3 Turbo' },
+  { value: 'whisper-large-v3', label: 'Whisper Large V3' },
+];
 
 window.marked = marked;
 window.DOMPurify = DOMPurify;
@@ -32,6 +40,12 @@ const state = {
   operatingMode: 'agent',
   sessions: [],
   attachments: [],
+  voiceRecorder: null,
+  isVoiceRecording: false,
+  isVoiceTranscribing: false,
+  homePath: null,
+  pendingWorkspacePath: null,
+  platform: null,
   contextInfo: null,
   permissions: [],
   betaFeatures: [],
@@ -45,6 +59,9 @@ async function init() {
     return;
   }
 
+  state.homePath = await window.studioAPI.getHomePath();
+  state.platform = await window.studioAPI.getPlatform();
+  document.body.dataset.platform = state.platform;
   setupTitlebar();
   setupSidebar();
   setupInput();
@@ -148,7 +165,8 @@ function onConfigUpdated(config) {
   else state.permMode = 'manual';
   updateModeTrigger();
   updateOperatingModeTrigger();
-  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'bananasplit'].includes(currentSettingsTab)) {
+  updateVoiceButtonState();
+  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'voice', 'bananasplit'].includes(currentSettingsTab)) {
     renderSettingsTab(currentSettingsTab);
   }
 }
@@ -165,16 +183,144 @@ async function fetchServerConfig() {
 }
 
 // ── Workspace ──
+function normalizeWorkspacePath(p) {
+  return p ? p.replace(/[\\/]+$/, '') : '';
+}
+
+function readRecentWorkspaces() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECENT_WORKSPACES_KEY) || '[]');
+    return Array.isArray(saved) ? saved.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentWorkspaces(paths) {
+  localStorage.setItem(RECENT_WORKSPACES_KEY, JSON.stringify(paths));
+}
+
+function readSessionWorkspaces() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_WORKSPACES_KEY) || '{}');
+    return saved && typeof saved === 'object' ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionWorkspaces(workspaces) {
+  localStorage.setItem(SESSION_WORKSPACES_KEY, JSON.stringify(workspaces));
+}
+
+function rememberSessionWorkspace(sessionId, workspacePath) {
+  if (!sessionId || !workspacePath) return;
+  const workspaces = readSessionWorkspaces();
+  workspaces[sessionId] = workspacePath;
+  writeSessionWorkspaces(workspaces);
+}
+
+function readCollapsedProjects() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLLAPSED_PROJECTS_KEY) || '[]');
+    return new Set(Array.isArray(saved) ? saved : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsedProjects(collapsed) {
+  localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify([...collapsed]));
+}
+
+function toggleProjectCollapsed(projectKey) {
+  const collapsed = readCollapsedProjects();
+  if (collapsed.has(projectKey)) collapsed.delete(projectKey);
+  else collapsed.add(projectKey);
+  writeCollapsedProjects(collapsed);
+  renderSessions(state.sessions);
+}
+
+function addRecentWorkspace(path) {
+  if (!path || normalizeWorkspacePath(path) === normalizeWorkspacePath(state.homePath)) return;
+  const normalized = normalizeWorkspacePath(path);
+  const recent = readRecentWorkspaces().filter(p => normalizeWorkspacePath(p) !== normalized);
+  writeRecentWorkspaces([path, ...recent].slice(0, MAX_RECENT_WORKSPACES));
+}
+
+function removeRecentWorkspace(path) {
+  const normalized = normalizeWorkspacePath(path);
+  writeRecentWorkspaces(readRecentWorkspaces().filter(p => normalizeWorkspacePath(p) !== normalized));
+  renderWorkspacePanel();
+}
+
+function folderName(path) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function sessionId(session = {}) {
+  return session.uuid || session.sessionId || session.id;
+}
+
+function sessionUpdatedAtMs(session = {}) {
+  return new Date(session.updatedAt || 0).getTime() || 0;
+}
+
+function sessionWorkspacePath(session = {}) {
+  const id = sessionId(session);
+  const remembered = id ? readSessionWorkspaces()[id] : null;
+  return session.workspacePath
+    || session.workspace_path
+    || session.workspace
+    || session.cwd
+    || session.projectPath
+    || session.project_path
+    || session.project
+    || session.folder
+    || session.workingDirectory
+    || session.working_directory
+    || session.directory
+    || session.root
+    || session.metadata?.workspacePath
+    || session.metadata?.workspace_path
+    || session.metadata?.workspace
+    || session.metadata?.cwd
+    || session.metadata?.projectPath
+    || session.metadata?.project_path
+    || session.metadata?.project
+    || session.metadata?.folder
+    || remembered
+    || null;
+}
+
+function inferredSessionWorkspacePath(session = {}) {
+  return sessionWorkspacePath(session);
+}
+
+function sessionProjectLabel(session) {
+  const workspacePath = inferredSessionWorkspacePath(session);
+  if (workspacePath) {
+    const isHomeFallback = normalizeWorkspacePath(workspacePath) === normalizeWorkspacePath(state.homePath);
+    return isHomeFallback ? 'Home' : folderName(workspacePath);
+  }
+
+  return 'No folder';
+}
+
 function updateWorkspacePill(p) {
   state.workspacePath = p;
+  const isHomeFallback = !p || normalizeWorkspacePath(p) === normalizeWorkspacePath(state.homePath);
+  if (isHomeFallback) {
+    $('#workspace-path').textContent = 'Home';
+    $('#workspace-pill').title = 'Change workspace folder';
+    return;
+  }
+
   const home = '~';
   const display = p.replace(/^\/home\/[^/]+/, home);
   $('#workspace-path').textContent = display;
   $('#workspace-pill').title = p;
-
-  const projectName = p.split(/[\\/]/).filter(Boolean).pop() || 'Workspace';
-  $('#sidebar-project-name').textContent = projectName;
-  $('#sidebar-project-row').title = p;
+  addRecentWorkspace(p);
 }
 
 // ── Toast ──
@@ -195,22 +341,60 @@ function setupSidebar() {
 }
 
 async function newChat() {
-  const dir = await window.studioAPI.openDirectoryDialog();
-  if (!dir) return;
-  state.ws.setWorkspace(dir);
+  const homeDir = state.homePath || await window.studioAPI.getHomePath();
+  if (homeDir) state.ws.setWorkspace(homeDir);
   state.ws.clearHistory();
   state.currentSessionId = null;
   clearMessages();
   $('#message-input').focus();
 }
 
+function emptyStateHtml() {
+  return `<div class="empty-state" id="empty-state">
+    <img class="empty-state-logo" src="../assets/banana.png" alt="">
+    <h2>What should we work on?</h2>
+    <div class="empty-suggestions" aria-label="Suggested tasks">
+      <div class="suggestion-card">
+        <div class="suggestion-icon code"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.5 5.5-4 4.5 4 4.5M12.5 5.5l4 4.5-4 4.5M11 4.5l-2 11"/></svg></div>
+        <div class="suggestion-title">Review codebase</div>
+        <div class="suggestion-desc">Understand your code and get insights</div>
+      </div>
+      <div class="suggestion-card">
+        <div class="suggestion-icon bug"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 7.5h6v5.2a3 3 0 0 1-6 0V7.5ZM6 5l2 2.5M14 5l-2 2.5M4.5 10H7M13 10h2.5M5 14h2.2M12.8 14H15M10 7.5v8M8 4.5h4"/></svg></div>
+        <div class="suggestion-title">Fix a bug</div>
+        <div class="suggestion-desc">Find issues and propose a fix</div>
+      </div>
+      <div class="suggestion-card">
+        <div class="suggestion-icon idea"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 14h5M8 16h4M13.5 8.7c0 1.3-.7 2.2-1.6 3-.5.5-.7 1-.7 1.3H8.8c0-.7-.3-1.1-.8-1.7-.8-.8-1.5-1.7-1.5-3A3.5 3.5 0 0 1 10 4.8a3.5 3.5 0 0 1 3.5 3.9Z"/></svg></div>
+        <div class="suggestion-title">Plan a feature</div>
+        <div class="suggestion-desc">Break down ideas into steps and tasks</div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function clearMessages() {
   const container = $('#messages-container');
-  container.innerHTML = `<div class="empty-state" id="empty-state">
-    <h2>What should we work on?</h2></div>`;
+  container.innerHTML = emptyStateHtml();
 }
 
 function onSessionsList(sessions) {
+  if (state.pendingWorkspacePath) {
+    const newestSession = [...sessions]
+      .sort((a, b) => sessionUpdatedAtMs(b) - sessionUpdatedAtMs(a))
+      .find(s => sessionId(s));
+    if (newestSession) {
+      rememberSessionWorkspace(sessionId(newestSession), state.pendingWorkspacePath);
+      state.pendingWorkspacePath = null;
+    }
+  }
+
+  sessions.forEach(session => {
+    const id = sessionId(session);
+    const workspacePath = sessionWorkspacePath(session);
+    if (id && workspacePath) rememberSessionWorkspace(id, workspacePath);
+  });
+
   state.sessions = sessions;
   renderSessions(sessions);
 }
@@ -219,41 +403,93 @@ function renderSessions(sessions) {
   const container = $('#sessions-container');
   if (!sessions.length) { container.innerHTML = '<p class="sidebar-empty">No chats yet</p>'; return; }
 
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today - 86400000);
-  const weekAgo = new Date(today - 7 * 86400000);
-
-  const groups = { 'Today': [], 'Yesterday': [], 'This Week': [], 'Older': [] };
+  const groups = new Map();
+  const ungroupedSessions = [];
   sessions.forEach(s => {
-    const d = new Date(s.updatedAt);
-    if (d >= today) groups['Today'].push(s);
-    else if (d >= yesterday) groups['Yesterday'].push(s);
-    else if (d >= weekAgo) groups['This Week'].push(s);
-    else groups['Older'].push(s);
+    const workspacePath = inferredSessionWorkspacePath(s);
+    if (!workspacePath) {
+      ungroupedSessions.push(s);
+      return;
+    }
+
+    const key = normalizeWorkspacePath(workspacePath) || '__no_folder__';
+    if (!groups.has(key)) {
+      groups.set(key, {
+        label: sessionProjectLabel(s),
+        path: workspacePath,
+        sessions: [],
+        updatedAt: 0,
+      });
+    }
+    const group = groups.get(key);
+    const updatedAt = sessionUpdatedAtMs(s);
+    group.updatedAt = Math.max(group.updatedAt, updatedAt);
+    group.sessions.push(s);
   });
 
-  let html = '';
-  for (const [label, items] of Object.entries(groups)) {
-    if (!items.length) continue;
-    html += `<div class="session-group-label">${label}</div>`;
-    items.forEach(s => {
-      const active = s.uuid === state.currentSessionId ? ' active' : '';
-      html += `<div class="session-item${active}" data-id="${s.uuid}">
+  const projectGroups = Array.from(groups.values())
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const collapsedProjects = readCollapsedProjects();
+
+  let html = projectGroups.map(group => {
+    const activeProject = group.sessions.some(s => String(sessionId(s)) === String(state.currentSessionId));
+    const projectKey = normalizeWorkspacePath(group.path) || group.label;
+    const collapsed = collapsedProjects.has(projectKey);
+    const pathAttr = group.path ? ` data-project-path="${escapeAttr(group.path)}"` : '';
+    let groupHtml = `<div class="project-group${activeProject ? ' active' : ''}${collapsed ? ' collapsed' : ''}">
+      <button class="project-group-header" type="button" data-project-key="${escapeAttr(projectKey)}"${pathAttr} title="${escapeAttr(group.path || group.label)}" aria-expanded="${!collapsed}">
+        <span class="project-group-caret">▾</span>
+        <span class="project-group-icon">${iconHtml('folder')}</span>
+        <span class="project-group-name">${escapeHtml(group.label)}</span>
+      </button>`;
+
+    group.sessions
+      .sort((a, b) => sessionUpdatedAtMs(b) - sessionUpdatedAtMs(a))
+      .forEach(s => {
+      const id = sessionId(s);
+      if (!id) return;
+      const active = String(id) === String(state.currentSessionId) ? ' active' : '';
+      groupHtml += `<div class="session-item${active}" data-id="${escapeAttr(id)}">
         <span class="session-title">${escapeHtml(s.title || 'Untitled')}</span>
         <span class="session-meta">${formatTime(s.updatedAt)}</span>
       </div>`;
     });
-  }
+
+    return groupHtml + '</div>';
+  }).join('');
+
+  html += ungroupedSessions
+    .sort((a, b) => sessionUpdatedAtMs(b) - sessionUpdatedAtMs(a))
+    .map(s => {
+      const id = sessionId(s);
+      if (!id) return '';
+      const active = String(id) === String(state.currentSessionId) ? ' active' : '';
+      return `<div class="session-item no-project${active}" data-id="${escapeAttr(id)}">
+        <span class="session-title">${escapeHtml(s.title || 'Untitled')}</span>
+        <span class="session-meta">${formatTime(s.updatedAt)}</span>
+      </div>`;
+    }).join('');
+
   container.innerHTML = html;
   container.querySelectorAll('.session-item').forEach(el => {
     el.addEventListener('click', () => loadSession(el.dataset.id));
+  });
+  container.querySelectorAll('[data-project-key]').forEach(el => {
+    el.addEventListener('click', () => {
+      toggleProjectCollapsed(el.dataset.projectKey);
+    });
   });
 }
 
 function filterSessions(query) {
   const q = query.toLowerCase();
-  const filtered = q ? state.sessions.filter(s => (s.title || '').toLowerCase().includes(q)) : state.sessions;
+  const filtered = q ? state.sessions.filter(s => {
+    const workspacePath = inferredSessionWorkspacePath(s) || '';
+    const projectLabel = sessionProjectLabel(s);
+    return (s.title || '').toLowerCase().includes(q)
+      || workspacePath.toLowerCase().includes(q)
+      || projectLabel.toLowerCase().includes(q);
+  }) : state.sessions;
   renderSessions(filtered);
 }
 
@@ -265,6 +501,8 @@ function loadSession(id) {
 
 function onSessionLoaded(data) {
   state.currentSessionId = data.sessionId;
+  const loadedWorkspace = sessionWorkspacePath(data);
+  if (loadedWorkspace) rememberSessionWorkspace(data.sessionId, loadedWorkspace);
   const container = $('#messages-container');
   container.innerHTML = '';
   $('#empty-state')?.remove();
@@ -539,6 +777,14 @@ function onToolEnd(result) {
 }
 
 function onDone(data) {
+  if (data.sessionId) {
+    state.currentSessionId = data.sessionId;
+    if (state.pendingWorkspacePath) {
+      rememberSessionWorkspace(data.sessionId, state.pendingWorkspacePath);
+      state.pendingWorkspacePath = null;
+    }
+  }
+
   let el = state.streamingEl;
   
   // If we didn't receive any chunks (non-streaming provider), create the message bubble now
@@ -577,6 +823,7 @@ function onDone(data) {
   state.streamingText = '';
   state.streamingEl = null;
   setInputEnabled(true);
+  state.ws.listSessions();
   if (state.serverConfig?.showTokenCount) state.ws.getContext();
 }
 
@@ -585,10 +832,12 @@ function setupInput() {
   const textarea = $('#message-input');
   const sendBtn = $('#btn-send');
   const attachBtn = $('#btn-add-attachment');
+  const voiceBtn = $('#btn-voice');
 
   textarea.addEventListener('input', () => {
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    updateVoiceButtonState();
   });
 
   textarea.addEventListener('keydown', (e) => {
@@ -600,7 +849,9 @@ function setupInput() {
 
   sendBtn.addEventListener('click', sendMessage);
   attachBtn?.addEventListener('click', addAttachments);
+  voiceBtn?.addEventListener('click', handleVoiceButtonClick);
   renderAttachmentChips();
+  updateVoiceButtonState();
 }
 
 async function addAttachments() {
@@ -611,6 +862,7 @@ async function addAttachments() {
     if (!existing.has(path)) state.attachments.push({ path });
   }
   renderAttachmentChips();
+  updateVoiceButtonState();
 }
 
 function renderAttachmentChips() {
@@ -627,14 +879,208 @@ function renderAttachmentChips() {
     chip.addEventListener('click', () => {
       state.attachments.splice(Number(chip.dataset.index), 1);
       renderAttachmentChips();
+      updateVoiceButtonState();
     });
   });
+}
+
+async function handleVoiceButtonClick() {
+  if (state.isVoiceRecording) {
+    await stopVoiceRecordingAndSend();
+    return;
+  }
+
+  const textarea = $('#message-input');
+  if (textarea.value.trim() || state.attachments.length > 0) {
+    showToast('info', 'Voice input starts from an empty message.');
+    textarea.focus();
+    return;
+  }
+
+  const voice = state.serverConfig?.voice || {};
+  if (voice.enabled === false) {
+    showToast('info', 'Voice input is disabled in Settings.');
+    return;
+  }
+
+  if (!voice.groqApiKey || !voice.model) {
+    openSettings();
+    setActiveSettingsTab('voice');
+    showToast('info', 'Set up voice input first.');
+    return;
+  }
+
+  if (state.isStreaming || state.isVoiceTranscribing) return;
+  await startVoiceRecording();
+}
+
+async function startVoiceRecording() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showToast('error', 'Microphone recording is not available in this environment.');
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+      video: false,
+    });
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const audioContext = new AudioContextClass();
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      chunks.push(new Float32Array(input));
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+
+    state.voiceRecorder = {
+      stream,
+      audioContext,
+      source,
+      processor,
+      chunks,
+      sampleRate: audioContext.sampleRate,
+      startedAt: Date.now(),
+    };
+    state.isVoiceRecording = true;
+    setInputEnabled(false);
+    updateVoiceButtonState();
+    showToast('info', 'Recording voice. Press the microphone again to stop.');
+  } catch (err) {
+    showToast('error', `Microphone access failed: ${err.message}`);
+    cleanupVoiceRecorder();
+    updateVoiceButtonState();
+  }
+}
+
+async function stopVoiceRecordingAndSend() {
+  const recorder = state.voiceRecorder;
+  if (!recorder) return;
+
+  state.isVoiceRecording = false;
+  state.isVoiceTranscribing = true;
+  updateVoiceButtonState();
+
+  cleanupVoiceRecorder();
+
+  try {
+    if (Date.now() - recorder.startedAt < 500 || recorder.chunks.length === 0) {
+      throw new Error('Recording was too short.');
+    }
+
+    const wavBlob = encodeWavBlob(recorder.chunks, recorder.sampleRate);
+    if (wavBlob.size <= 44) throw new Error('Recording did not capture audio.');
+
+    if (!state.currentSessionId) state.pendingWorkspacePath = state.workspacePath;
+    showToast('info', 'Transcribing voice...');
+    state.isStreaming = true;
+    const result = await state.ws.sendVoice(wavBlob, { fileName: 'voice.wav' });
+    if (result.transcript) addMessageBubble('user', result.transcript);
+    onDone(result);
+  } catch (err) {
+    state.isStreaming = false;
+    setInputEnabled(true);
+    showToast('error', `Voice input failed: ${err.message}`);
+  } finally {
+    state.isVoiceTranscribing = false;
+    updateVoiceButtonState();
+  }
+}
+
+function cleanupVoiceRecorder() {
+  const recorder = state.voiceRecorder;
+  if (!recorder) return;
+  try { recorder.processor.disconnect(); } catch {}
+  try { recorder.source.disconnect(); } catch {}
+  try { recorder.audioContext.close(); } catch {}
+  recorder.stream.getTracks().forEach(track => track.stop());
+  state.voiceRecorder = null;
+}
+
+function encodeWavBlob(chunks, sampleRate) {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const samples = new Float32Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    samples.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 8 * bytesPerSample, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let position = 44;
+  for (const sample of samples) {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(position, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+    position += 2;
+  }
+
+  return new Blob([view], { type: 'audio/wav' });
+}
+
+function writeAscii(view, offset, text) {
+  for (let i = 0; i < text.length; i++) {
+    view.setUint8(offset + i, text.charCodeAt(i));
+  }
+}
+
+function updateVoiceButtonState() {
+  const btn = $('#btn-voice');
+  if (!btn) return;
+  const textarea = $('#message-input');
+  const blockedByContent = Boolean(textarea.value.trim() || state.attachments.length > 0);
+  const voice = state.serverConfig?.voice || {};
+  const isSetup = Boolean(voice.groqApiKey && voice.model);
+  const isEnabled = voice.enabled !== false;
+  const canStart = !state.isStreaming
+    && !state.isVoiceTranscribing
+    && !blockedByContent
+    && isEnabled;
+  btn.disabled = state.isVoiceRecording ? false : !canStart;
+  btn.classList.toggle('recording', state.isVoiceRecording);
+  btn.classList.toggle('busy', state.isVoiceTranscribing);
+  btn.classList.toggle('needs-setup', !isSetup && isEnabled && !blockedByContent);
+  btn.title = state.isVoiceRecording
+    ? 'Stop recording'
+    : (state.isVoiceTranscribing
+      ? 'Transcribing voice...'
+      : (blockedByContent
+        ? 'Clear the message to record voice'
+        : (!isEnabled ? 'Voice is disabled in Settings' : (!isSetup ? 'Set up voice in Settings' : 'Record voice message'))));
+  btn.setAttribute('aria-label', btn.title);
 }
 
 function sendMessage() {
   const textarea = $('#message-input');
   const text = textarea.value.trim();
   if ((!text && state.attachments.length === 0) || state.isStreaming) return;
+  if (!state.currentSessionId) state.pendingWorkspacePath = state.workspacePath;
 
   const attachments = state.attachments.map(a => ({ path: a.path }));
   const attachmentLabel = attachments.length
@@ -654,6 +1100,7 @@ function setInputEnabled(enabled) {
   $('#btn-send').disabled = !enabled;
   const attachBtn = $('#btn-add-attachment');
   if (attachBtn) attachBtn.disabled = !enabled;
+  updateVoiceButtonState();
 }
 
 // ── Dropdowns ──
@@ -1013,15 +1460,78 @@ function respondPermission(allowed, session) {
 
 // ── Toolbar ──
 function setupToolbar() {
-  const chooseWorkspace = async () => {
+  const chooseWorkspaceFromDialog = async () => {
     const dir = await window.studioAPI.openDirectoryDialog();
-    if (dir) state.ws.setWorkspace(dir);
+    if (dir) {
+      addRecentWorkspace(dir);
+      state.ws.setWorkspace(dir);
+      closeAllDropdowns();
+    }
   };
-  $('#workspace-pill').addEventListener('click', chooseWorkspace);
-  $('#sidebar-project-row').addEventListener('click', chooseWorkspace);
+  const selectWorkspace = (dir) => {
+    addRecentWorkspace(dir);
+    state.ws.setWorkspace(dir);
+    closeAllDropdowns();
+  };
+
+  const workspacePill = $('#workspace-pill');
+  const workspacePanel = $('#workspace-panel');
+
+  workspacePill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAllDropdowns();
+    renderWorkspacePanel();
+    workspacePanel.classList.toggle('open');
+  });
+  workspacePanel.addEventListener('click', (e) => e.stopPropagation());
+  workspacePanel.addEventListener('click', (e) => {
+    const deleteBtn = e.target.closest('[data-delete-workspace]');
+    if (deleteBtn) {
+      removeRecentWorkspace(deleteBtn.dataset.deleteWorkspace);
+      return;
+    }
+
+    const item = e.target.closest('[data-workspace-path]');
+    if (item) {
+      selectWorkspace(item.dataset.workspacePath);
+      return;
+    }
+
+    if (e.target.closest('[data-browse-workspace]')) chooseWorkspaceFromDialog();
+  });
+
   $('#btn-init').addEventListener('click', () => { state.ws.initProject(); showToast('info', 'Generating BANANA.md...'); });
   $('#btn-compress').addEventListener('click', () => { state.ws.cleanContext(); showToast('info', 'Compressing context...'); });
   $('#btn-clear').addEventListener('click', () => { state.ws.clearHistory(); });
+}
+
+function renderWorkspacePanel() {
+  const panel = $('#workspace-panel');
+  const activePath = normalizeWorkspacePath(state.workspacePath);
+  const recent = readRecentWorkspaces();
+
+  let html = '<div class="dropdown-label">Folders</div>';
+  if (recent.length === 0) {
+    html += '<div class="workspace-empty">No saved folders</div>';
+  } else {
+    html += recent.map(path => {
+      const active = normalizeWorkspacePath(path) === activePath;
+      return `<div class="workspace-item${active ? ' active' : ''}" data-workspace-path="${escapeAttr(path)}" title="${escapeAttr(path)}">
+        <div class="workspace-item-text">
+          <span class="workspace-item-name">${escapeHtml(folderName(path))}</span>
+          <span class="workspace-item-path">${escapeHtml(path)}</span>
+        </div>
+        <button class="workspace-delete" type="button" data-delete-workspace="${escapeAttr(path)}" title="Remove from list" aria-label="Remove ${escapeAttr(folderName(path))} from list">×</button>
+      </div>`;
+    }).join('');
+  }
+
+  html += '<div class="dropdown-separator"></div>';
+  html += `<button class="workspace-browse" type="button" data-browse-workspace>
+    <span class="workspace-icon">${iconHtml('folder')}</span>
+    <span>Browse for folder...</span>
+  </button>`;
+  panel.innerHTML = html;
 }
 
 // ── Settings Panel ──
@@ -1084,6 +1594,42 @@ function renderSettingsTab(tab) {
       state.ws.connect(newConfig.serverUrl, newConfig.token);
       closeSettings();
       showToast('success', 'Connection updated');
+    });
+  } else if (tab === 'voice') {
+    const voice = state.serverConfig?.voice || {};
+    const configured = Boolean(voice.groqApiKey && voice.model);
+    const enabled = voice.enabled !== false;
+    body.innerHTML = `<div class="settings-section"><h3>Voice Input</h3>
+      <div class="toggle-container"><span class="toggle-label">Enable microphone transcription</span>
+        <div class="toggle${enabled ? ' active' : ''}" id="toggle-voice"></div></div>
+      <div class="settings-field"><label>Groq API Key</label>
+        <input type="password" id="voice-groq-key" placeholder="gsk_..." value="${escapeAttr(voice.groqApiKey || '')}"></div>
+      <div class="settings-field"><label>Whisper Model</label>
+        ${customSelectHtml('voice-model', VOICE_MODELS, voice.model || 'whisper-large-v3-turbo')}</div>
+      <div class="test-result ${configured ? 'success' : 'warning'}">${configured ? 'Voice is configured on the Banana Code server.' : 'Add a Groq API key and save to finish setup.'}</div>
+      <button class="btn-settings-action" id="btn-save-voice" style="width:100%;margin-top:14px">Save Voice Settings</button>
+    </div>`;
+    initCustomSelects(body);
+    $('#toggle-voice').addEventListener('click', () => {
+      $('#toggle-voice').classList.toggle('active');
+    });
+    $('#btn-save-voice').addEventListener('click', () => {
+      const groqApiKey = $('#voice-groq-key').value.trim();
+      const model = $('#voice-model').value || 'whisper-large-v3-turbo';
+      const nextVoice = {
+        ...voice,
+        enabled: $('#toggle-voice').classList.contains('active'),
+        groqApiKey,
+        model,
+      };
+
+      if (nextVoice.enabled && !groqApiKey) {
+        showToast('error', 'Groq API key is required to enable voice input.');
+        return;
+      }
+
+      state.ws.updateConfig({ voice: nextVoice }, true);
+      showToast('success', nextVoice.enabled ? 'Voice settings saved' : 'Voice input disabled');
     });
   } else if (tab === 'modes') {
     const isGuard = state.permMode === 'guard';

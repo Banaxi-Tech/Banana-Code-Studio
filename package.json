@@ -29,7 +29,10 @@
     "icon": "assets/banana.png",
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": "zip"
+      "target": "zip",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Banana Code Studio uses the microphone to record voice prompts for transcription."
+      }
     },
     "win": {
       "target": "nsis"
