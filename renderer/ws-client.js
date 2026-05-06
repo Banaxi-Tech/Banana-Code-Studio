@@ -258,6 +258,14 @@ export class WSClient {
         this.emit('attachmentsDropped', data.attachments || []);
         break;
 
+      case 'browser_request':
+        this.emit('browserRequest', {
+          requestId: data.requestId,
+          action: data.action,
+          params: data.params || {},
+        });
+        break;
+
       default:
         console.log('[WS] Unknown message type:', data.type);
     }
@@ -274,7 +282,7 @@ export class WSClient {
   }
 
   // Convenience methods
-  sendChat(text, attachments = []) { return this.send('chat', { text, attachments }); }
+  sendChat(text, attachments = [], browserElements = []) { return this.send('chat', { text, attachments, browserElements }); }
   setWorkspace(path) { return this.send('set_workspace', { path }); }
   updateConfig(config, save = false) { return this.send('update_config', { config, save }); }
   getContext() { return this.send('get_context'); }
@@ -295,6 +303,11 @@ export class WSClient {
   respondPermission(ticketId, allowed, session = false) {
     return this.send('permission_response', { ticketId, allowed, session });
   }
+  browserBridgeReady() { return this.send('browser_bridge_ready'); }
+  respondBrowser(requestId, ok, payload = {}) {
+    return this.send('browser_response', { requestId, ok, ...payload });
+  }
+  sendBrowserState(state) { return this.send('browser_state', { state }); }
 
   disconnect() {
     clearTimeout(this.reconnectTimer);

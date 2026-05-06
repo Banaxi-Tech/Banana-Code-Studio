@@ -25,4 +25,7 @@ contextBridge.exposeInMainWorld('studioAPI', {
 
   // Platform info
   getPlatform: () => ipcRenderer.invoke('get-platform'),
+
+  // Browser Use
+  clearBrowserData: () => ipcRenderer.invoke('clear-browser-data'),
 });

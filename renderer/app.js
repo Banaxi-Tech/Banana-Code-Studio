@@ -11,6 +11,7 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 const RECENT_WORKSPACES_KEY = 'recentWorkspaces';
 const SESSION_WORKSPACES_KEY = 'sessionWorkspaces';
+const SESSION_BROWSER_STATES_KEY = 'sessionBrowserStates';
 const COLLAPSED_PROJECTS_KEY = 'collapsedProjects';
 const MAX_RECENT_WORKSPACES = 8;
 const DEFAULT_IMAGEGEN_BASE_URL = 'http://127.0.0.1:8000';
@@ -41,6 +42,7 @@ const state = {
   operatingMode: 'agent',
   sessions: [],
   attachments: [],
+  browserElementAttachments: [],
   voiceRecorder: null,
   isVoiceRecording: false,
   isVoiceTranscribing: false,
@@ -53,6 +55,18 @@ const state = {
   imageGenModels: null,
   imageGenCards: new Map(),
   renderedImageGenRequestIds: new Set(),
+  browser: {
+    open: false,
+    loading: false,
+    domReady: false,
+    url: '',
+    title: '',
+    refs: {},
+    lastMouse: { x: 80, y: 80 },
+    resizing: false,
+    editMode: false,
+    pickerNonce: '',
+  },
 };
 
 // ── Init ──
@@ -71,6 +85,7 @@ async function init() {
   setupInput();
   setupDropdowns();
   setupToolbar();
+  setupBrowserUse();
   setupSettings();
   setupPermissionModal();
   connectWebSocket();
@@ -100,6 +115,7 @@ function connectWebSocket() {
   });
 
   ws.on('connected', () => {
+    ws.browserBridgeReady();
     ws.listSessions();
     fetchServerConfig();
     ws.getContext();
@@ -145,6 +161,7 @@ function connectWebSocket() {
   ws.on('imageGenerationProgress', onImageGenerationProgress);
   ws.on('imageGenerationResult', onImageGenerationResult);
   ws.on('attachmentsDropped', onAttachmentsDropped);
+  ws.on('browserRequest', onBrowserRequest);
   ws.on('terminalOutput', (data) => console.log('[terminal_output]', data));
   ws.on('authFailure', () => showToast('error', 'Auth failed. Check settings.'));
   ws.on('error', (msg) => showToast('error', `Server Error: ${msg}`));
@@ -174,7 +191,7 @@ function onConfigUpdated(config) {
   updateModeTrigger();
   updateOperatingModeTrigger();
   updateVoiceButtonState();
-  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'voice', 'imagegen', 'bananasplit'].includes(currentSettingsTab)) {
+  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'voice', 'imagegen', 'browser', 'bananasplit'].includes(currentSettingsTab)) {
     renderSettingsTab(currentSettingsTab);
   }
 }
@@ -221,11 +238,36 @@ function writeSessionWorkspaces(workspaces) {
   localStorage.setItem(SESSION_WORKSPACES_KEY, JSON.stringify(workspaces));
 }
 
+function readSessionBrowserStates() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_BROWSER_STATES_KEY) || '{}');
+    return saved && typeof saved === 'object' ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionBrowserStates(browserStates) {
+  localStorage.setItem(SESSION_BROWSER_STATES_KEY, JSON.stringify(browserStates));
+}
+
 function rememberSessionWorkspace(sessionId, workspacePath) {
   if (!sessionId || !workspacePath) return;
   const workspaces = readSessionWorkspaces();
   workspaces[sessionId] = workspacePath;
   writeSessionWorkspaces(workspaces);
+}
+
+function rememberSessionBrowserState(sessionId = state.currentSessionId) {
+  if (!sessionId) return;
+  const browserStates = readSessionBrowserStates();
+  browserStates[sessionId] = {
+    open: Boolean(state.browser.open),
+    url: state.browser.url || safeWebviewCall(getBrowserWebview(), 'getURL') || '',
+    title: state.browser.title || safeWebviewCall(getBrowserWebview(), 'getTitle') || '',
+    updatedAt: Date.now(),
+  };
+  writeSessionBrowserStates(browserStates);
 }
 
 function readCollapsedProjects() {
@@ -509,6 +551,7 @@ function filterSessions(query) {
 }
 
 function loadSession(id) {
+  rememberSessionBrowserState();
   state.currentSessionId = id;
   state.ws.loadSession(id);
   $$('.session-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
@@ -581,6 +624,9 @@ function onSessionLoaded(data) {
   });
   
   container.scrollTop = container.scrollHeight;
+  restoreSessionBrowserState(data.sessionId).catch(error => {
+    showToast('warning', `Could not restore browser: ${error.message}`);
+  });
   state.ws.listSessions(); // refresh sidebar to highlight active
   if (state.serverConfig?.showTokenCount) state.ws.getContext();
 }
@@ -824,6 +870,7 @@ function onDone(data) {
       rememberSessionWorkspace(data.sessionId, state.pendingWorkspacePath);
       state.pendingWorkspacePath = null;
     }
+    rememberSessionBrowserState(data.sessionId);
   }
 
   let el = state.streamingEl;
@@ -1265,6 +1312,965 @@ function renderGeneratedImagesFromDone(images = []) {
   });
 }
 
+// ── Browser Use ──
+function setupBrowserUse() {
+  const panel = $('#browser-panel');
+  const webview = $('#browser-webview');
+  if (!panel || !webview) return;
+
+  const updateLoading = (loading) => {
+    state.browser.loading = loading;
+    updateBrowserChrome();
+  };
+
+  webview.addEventListener('did-start-loading', () => {
+    state.browser.domReady = false;
+    state.browser.editMode = false;
+    rotateBrowserPickerNonce();
+    updateLoading(true);
+  });
+  webview.addEventListener('did-stop-loading', () => {
+    updateLoading(false);
+    if (state.browser.domReady) injectBrowserTheme().catch(() => {});
+    if (state.browser.domReady) injectBrowserCursor().catch(() => {});
+    syncBrowserState();
+  });
+  webview.addEventListener('dom-ready', () => {
+    state.browser.domReady = true;
+    injectBrowserTheme().catch(() => {});
+    injectBrowserCursor().catch(() => {});
+    injectBrowserElementPicker().catch(() => {});
+    syncBrowserState();
+  });
+  webview.addEventListener('console-message', (event) => {
+    const message = event.message || '';
+    const prefix = '__BANANA_EDIT_ELEMENT__';
+    if (!message.startsWith(prefix)) return;
+    try {
+      const payload = JSON.parse(message.slice(prefix.length));
+      if (payload?.type === 'picker_state') {
+        if (!hasValidBrowserPickerNonce(payload)) return;
+        state.browser.editMode = Boolean(payload.enabled);
+        updateBrowserChrome();
+        return;
+      }
+      if (!isTrustedBrowserElementPayload(payload)) return;
+      if (payload?.element) {
+        submitBrowserElementEdit(payload.element, payload.instruction || '');
+      } else {
+        addBrowserElementAttachment(payload);
+      }
+    } catch (error) {
+      showToast('error', `Could not attach browser element: ${error.message}`);
+    }
+  });
+  webview.addEventListener('did-navigate', () => syncBrowserState());
+  webview.addEventListener('did-navigate-in-page', () => syncBrowserState());
+  webview.addEventListener('page-title-updated', (event) => {
+    state.browser.title = event.title || '';
+    syncBrowserState();
+  });
+  webview.addEventListener('did-fail-load', (event) => {
+    updateLoading(false);
+    state.browser.domReady = true;
+    state.browser.editMode = false;
+    rotateBrowserPickerNonce();
+    state.browser.title = event.errorDescription || 'Load failed';
+    syncBrowserState();
+  });
+  webview.addEventListener('will-navigate', (event) => {
+    if (!isBrowserUrlAllowed(event.url)) {
+      event.preventDefault?.();
+      showToast('warning', 'Browser Use only allows HTTP and HTTPS pages.');
+    }
+  });
+  webview.addEventListener('new-window', (event) => {
+    event.preventDefault?.();
+    if (event.url && isBrowserUrlAllowed(event.url)) runBrowserAction('open', { url: event.url }).catch(() => {});
+  });
+
+  $('#browser-back')?.addEventListener('click', () => runBrowserAction('back').catch(err => showToast('error', err.message)));
+  $('#browser-forward')?.addEventListener('click', () => runBrowserAction('forward').catch(err => showToast('error', err.message)));
+  $('#browser-reload')?.addEventListener('click', () => runBrowserAction('reload').catch(err => showToast('error', err.message)));
+  $('#browser-close')?.addEventListener('click', () => runBrowserAction('close').catch(err => showToast('error', err.message)));
+  document.addEventListener('keydown', (event) => {
+    if (!state.browser.open || event.defaultPrevented) return;
+    if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'e') {
+      event.preventDefault();
+      toggleBrowserElementPicker().catch(err => showToast('error', err.message));
+    }
+  });
+  setupBrowserResizer();
+}
+
+function setupBrowserResizer() {
+  const resizer = $('#browser-resizer');
+  const panel = $('#browser-panel');
+  if (!resizer || !panel) return;
+
+  resizer.addEventListener('pointerdown', (event) => {
+    state.browser.resizing = true;
+    resizer.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+
+  resizer.addEventListener('pointermove', (event) => {
+    if (!state.browser.resizing) return;
+    const appRect = $('.app-container').getBoundingClientRect();
+    const nextWidth = Math.max(420, Math.min(980, appRect.right - event.clientX));
+    panel.style.width = `${nextWidth}px`;
+  });
+
+  const stopResize = (event) => {
+    state.browser.resizing = false;
+    try { resizer.releasePointerCapture(event.pointerId); } catch {}
+  };
+  resizer.addEventListener('pointerup', stopResize);
+  resizer.addEventListener('pointercancel', stopResize);
+}
+
+function getBrowserWebview() {
+  return $('#browser-webview');
+}
+
+function showBrowserPanel() {
+  const panel = $('#browser-panel');
+  if (!panel) return;
+  panel.classList.remove('hidden');
+  state.browser.open = true;
+  updateBrowserChrome();
+}
+
+async function revealBrowserPanel() {
+  showBrowserPanel();
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+function updateBrowserChrome() {
+  const webview = getBrowserWebview();
+  const url = safeWebviewCall(webview, 'getURL') || state.browser.url || 'about:blank';
+  const title = safeWebviewCall(webview, 'getTitle') || state.browser.title || '';
+  state.browser.url = url;
+  state.browser.title = title;
+
+  const address = $('#browser-address');
+  const status = $('#browser-status');
+  if (address) {
+    address.textContent = url || 'about:blank';
+    address.title = title ? `${title}\n${url}` : url;
+  }
+  if (status) status.textContent = state.browser.loading ? 'Loading' : (state.browser.editMode ? 'Pick element' : (state.browser.open ? 'Ready' : 'Idle'));
+}
+
+function syncBrowserState(extra = {}) {
+  updateBrowserChrome();
+  rememberSessionBrowserState();
+  state.ws.sendBrowserState({
+    open: state.browser.open,
+    loading: state.browser.loading,
+    url: state.browser.url,
+    title: state.browser.title,
+    ...extra,
+  });
+}
+
+function safeWebviewCall(webview, method) {
+  try {
+    return webview?.[method]?.();
+  } catch {
+    return '';
+  }
+}
+
+function createBrowserRuntimeNonce() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto?.getRandomValues?.(bytes);
+  if (bytes.some(Boolean)) return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function rotateBrowserPickerNonce() {
+  state.browser.pickerNonce = createBrowserRuntimeNonce();
+  return state.browser.pickerNonce;
+}
+
+function ensureBrowserPickerNonce() {
+  if (!state.browser.pickerNonce) return rotateBrowserPickerNonce();
+  return state.browser.pickerNonce;
+}
+
+function hasValidBrowserPickerNonce(payload) {
+  return Boolean(state.browser.open && payload && typeof payload === 'object' && state.browser.pickerNonce && payload.nonce === state.browser.pickerNonce);
+}
+
+function isTrustedBrowserElementPayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (!state.browser.editMode) return false;
+  return hasValidBrowserPickerNonce(payload);
+}
+
+function isBrowserUrlAllowed(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function waitForBrowserLoad(timeoutMs = 30000) {
+  const webview = getBrowserWebview();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      webview.removeEventListener('did-stop-loading', finish);
+      webview.removeEventListener('did-fail-load', finish);
+      setTimeout(resolve, 250);
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    webview.addEventListener('did-stop-loading', finish, { once: true });
+    webview.addEventListener('did-fail-load', finish, { once: true });
+  });
+}
+
+function waitForBrowserDomReady(timeoutMs = 30000) {
+  const webview = getBrowserWebview();
+  if (state.browser.domReady) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      webview.removeEventListener('dom-ready', finish);
+      webview.removeEventListener('did-fail-load', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    webview.addEventListener('dom-ready', finish, { once: true });
+    webview.addEventListener('did-fail-load', finish, { once: true });
+  });
+}
+
+async function navigateBrowser(url) {
+  const webview = getBrowserWebview();
+  state.browser.domReady = false;
+  state.browser.loading = true;
+  state.browser.url = url;
+  updateBrowserChrome();
+  webview.setAttribute('src', url);
+  await Promise.race([
+    waitForBrowserDomReady(),
+    waitForBrowserLoad(),
+  ]);
+  await waitForBrowserDomReady(5000);
+  state.browser.loading = Boolean(safeWebviewCall(webview, 'isLoading'));
+  updateBrowserChrome();
+  rememberSessionBrowserState();
+}
+
+async function restoreSessionBrowserState(sessionId) {
+  const saved = readSessionBrowserStates()[sessionId];
+  if (!saved || !saved.open || !saved.url || !isBrowserUrlAllowed(saved.url)) return;
+
+  const currentUrl = safeWebviewCall(getBrowserWebview(), 'getURL') || state.browser.url || '';
+  showBrowserPanel();
+  if (currentUrl !== saved.url) {
+    await navigateBrowser(saved.url);
+  } else {
+    state.browser.url = saved.url;
+    state.browser.title = saved.title || state.browser.title;
+    updateBrowserChrome();
+    syncBrowserState();
+  }
+}
+
+async function injectBrowserCursor() {
+  const webview = getBrowserWebview();
+  if (!webview || !state.browser.open) return;
+  await waitForBrowserDomReady(5000);
+  if (!state.browser.domReady) return;
+  await webview.executeJavaScript(`
+    (() => {
+      if (document.getElementById('banana-ai-cursor')) return true;
+      const cursor = document.createElement('div');
+      cursor.id = 'banana-ai-cursor';
+      cursor.setAttribute('aria-hidden', 'true');
+      cursor.style.cssText = [
+        'position:fixed',
+        'left:0',
+        'top:0',
+        'width:18px',
+        'height:18px',
+        'border-radius:999px',
+        'background:#2f7cf6',
+        'border:2px solid #fff',
+        'box-shadow:0 4px 14px rgba(0,0,0,.28)',
+        'z-index:2147483647',
+        'pointer-events:none',
+        'transform:translate(80px,80px)',
+        'transition:transform 140ms ease, opacity 140ms ease',
+        'opacity:.96'
+      ].join(';');
+      const dot = document.createElement('div');
+      dot.style.cssText = 'position:absolute;left:5px;top:5px;width:4px;height:4px;border-radius:50%;background:#fff;';
+      cursor.appendChild(dot);
+      document.documentElement.appendChild(cursor);
+      return true;
+    })();
+  `);
+}
+
+async function injectBrowserTheme() {
+  const webview = getBrowserWebview();
+  if (!webview || !state.browser.open) return;
+  await waitForBrowserDomReady(5000);
+  if (!state.browser.domReady) return;
+  await webview.executeJavaScript(`
+    (() => {
+      let style = document.getElementById('banana-browser-dark-scrollbar');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'banana-browser-dark-scrollbar';
+        document.documentElement.appendChild(style);
+      }
+      style.textContent = [
+        'html{color-scheme:dark;}',
+        '::-webkit-scrollbar{width:13px;height:13px;background:#0b1220;}',
+        '::-webkit-scrollbar-track{background:#0b1220;}',
+        '::-webkit-scrollbar-thumb{background:#475569;border:3px solid #0b1220;border-radius:999px;}',
+        '::-webkit-scrollbar-thumb:hover{background:#64748b;}',
+        '::-webkit-scrollbar-corner{background:#0b1220;}'
+      ].join('');
+      return true;
+    })();
+  `);
+}
+
+async function injectBrowserElementPicker() {
+  const webview = getBrowserWebview();
+  if (!webview || !state.browser.open) return;
+  await waitForBrowserDomReady(5000);
+  if (!state.browser.domReady) return;
+  const pickerNonce = ensureBrowserPickerNonce();
+  await webview.executeJavaScript(`
+    (() => {
+      if (window.__bananaElementPickerInstalled) return true;
+      window.__bananaElementPickerInstalled = true;
+      window.__bananaElementPickerEnabled = false;
+      window.__bananaElementPickerTarget = null;
+      const pickerNonce = ${JSON.stringify(pickerNonce)};
+
+      const style = document.createElement('style');
+      style.id = 'banana-element-picker-style';
+      style.textContent = [
+        '#banana-element-picker-box{position:fixed;z-index:2147483646;pointer-events:none;border:2px solid #2f7cf6;background:rgba(47,124,246,.12);box-shadow:0 0 0 1px rgba(255,255,255,.8),0 8px 24px rgba(0,0,0,.18);display:none;}',
+        '#banana-element-picker-menu{position:fixed;z-index:2147483647;min-width:154px;padding:5px;background:#202124;color:#f7f7f7;border:1px solid rgba(255,255,255,.16);border-radius:7px;box-shadow:0 12px 34px rgba(0,0,0,.32);font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:none;}',
+        '#banana-element-picker-menu button{width:100%;border:0;background:transparent;color:inherit;text-align:left;padding:8px 9px;border-radius:5px;font:inherit;cursor:pointer;}',
+        '#banana-element-picker-menu button:hover{background:#2f7cf6;}',
+        '#banana-element-picker-chat{position:fixed;z-index:2147483647;width:min(330px,calc(100vw - 24px));padding:10px;background:#111827;color:#f8fafc;border:1px solid rgba(148,163,184,.28);border-radius:8px;box-shadow:0 18px 48px rgba(0,0,0,.42);font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:none;}',
+        '#banana-element-picker-chat textarea{width:100%;height:76px;resize:none;box-sizing:border-box;border:1px solid rgba(148,163,184,.32);border-radius:6px;background:#0b1220;color:#f8fafc;padding:8px;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;outline:none;}',
+        '#banana-element-picker-chat textarea:focus{border-color:#2f7cf6;box-shadow:0 0 0 2px rgba(47,124,246,.25);}',
+        '#banana-element-picker-chat-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:8px;}',
+        '#banana-element-picker-chat button{border:0;border-radius:6px;padding:7px 10px;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;cursor:pointer;}',
+        '#banana-element-picker-chat-cancel{background:#1f2937;color:#d1d5db;}',
+        '#banana-element-picker-chat-send{background:#2f7cf6;color:white;}',
+        '#banana-element-picker-badge{position:fixed;right:14px;bottom:14px;z-index:2147483647;background:#2f7cf6;color:white;border-radius:999px;padding:7px 10px;font:12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25);display:none;}'
+      ].join('');
+      document.documentElement.appendChild(style);
+
+      const box = document.createElement('div');
+      box.id = 'banana-element-picker-box';
+      document.documentElement.appendChild(box);
+
+      const menu = document.createElement('div');
+      menu.id = 'banana-element-picker-menu';
+      const editButton = document.createElement('button');
+      editButton.type = 'button';
+      editButton.textContent = 'Edit using AI';
+      menu.appendChild(editButton);
+      document.documentElement.appendChild(menu);
+
+      const badge = document.createElement('div');
+      badge.id = 'banana-element-picker-badge';
+      badge.textContent = 'Element picker: hover, right-click, Edit using AI';
+      document.documentElement.appendChild(badge);
+
+      const chat = document.createElement('form');
+      chat.id = 'banana-element-picker-chat';
+      chat.innerHTML = '<textarea placeholder="What should AI change?"></textarea><div id="banana-element-picker-chat-actions"><button id="banana-element-picker-chat-cancel" type="button">Cancel</button><button id="banana-element-picker-chat-send" type="submit">Send</button></div>';
+      document.documentElement.appendChild(chat);
+      const chatInput = chat.querySelector('textarea');
+      const chatCancel = chat.querySelector('#banana-element-picker-chat-cancel');
+
+      const ignored = new Set(['HTML', 'BODY']);
+      const isPickerUi = (el) => Boolean(el?.closest?.('#banana-element-picker-menu,#banana-element-picker-box,#banana-element-picker-badge,#banana-element-picker-chat,#banana-ai-cursor'));
+      const hideMenu = () => { menu.style.display = 'none'; };
+      const hideChat = () => { chat.style.display = 'none'; };
+      const updateBox = (el) => {
+        if (!el || ignored.has(el.tagName) || isPickerUi(el)) {
+          box.style.display = 'none';
+          return;
+        }
+        const rect = el.getBoundingClientRect();
+        window.__bananaElementPickerTarget = el;
+        box.style.display = 'block';
+        box.style.left = Math.max(0, rect.left) + 'px';
+        box.style.top = Math.max(0, rect.top) + 'px';
+        box.style.width = Math.max(0, rect.width) + 'px';
+        box.style.height = Math.max(0, rect.height) + 'px';
+      };
+      const cssEscape = (value) => {
+        if (window.CSS?.escape) return window.CSS.escape(value);
+        return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
+      };
+      const selectorFor = (el) => {
+        if (!el || !el.tagName) return '';
+        if (el.id) return '#' + cssEscape(el.id);
+        const parts = [];
+        let node = el;
+        while (node && node.nodeType === 1 && node !== document.documentElement) {
+          let part = node.tagName.toLowerCase();
+          const classes = Array.from(node.classList || []).filter(Boolean).slice(0, 3);
+          if (classes.length) part += '.' + classes.map(cssEscape).join('.');
+          const parent = node.parentElement;
+          if (parent) {
+            const sameTag = Array.from(parent.children).filter(child => child.tagName === node.tagName);
+            if (sameTag.length > 1) part += ':nth-of-type(' + (sameTag.indexOf(node) + 1) + ')';
+          }
+          parts.unshift(part);
+          node = parent;
+          if (parts.length >= 6) break;
+        }
+        return parts.join(' > ');
+      };
+      const xpathFor = (el) => {
+        const parts = [];
+        let node = el;
+        while (node && node.nodeType === 1) {
+          let index = 1;
+          let sibling = node.previousElementSibling;
+          while (sibling) {
+            if (sibling.tagName === node.tagName) index += 1;
+            sibling = sibling.previousElementSibling;
+          }
+          parts.unshift(node.tagName.toLowerCase() + '[' + index + ']');
+          node = node.parentElement;
+        }
+        return '/' + parts.join('/');
+      };
+      const attrsFor = (el) => Object.fromEntries(Array.from(el.attributes || []).slice(0, 32).map(attr => [attr.name, attr.value]));
+      const ancestryFor = (el) => {
+        const ancestry = [];
+        let node = el;
+        while (node && node.nodeType === 1 && node !== document.documentElement && ancestry.length < 8) {
+          ancestry.push({
+            tag: node.tagName.toLowerCase(),
+            id: node.id || '',
+            className: typeof node.className === 'string' ? node.className : '',
+            role: node.getAttribute('role') || '',
+            selector: selectorFor(node)
+          });
+          node = node.parentElement;
+        }
+        return ancestry;
+      };
+      const sourceHintsFor = (el) => {
+        const hints = [];
+        const seen = new Set();
+        const pushHint = (hint) => {
+          if (!hint || typeof hint !== 'object') return;
+          const normalized = {
+            fileName: hint.fileName || hint.file || hint.url || '',
+            lineNumber: hint.lineNumber || hint.line || null,
+            columnNumber: hint.columnNumber || hint.column || null,
+            componentName: hint.componentName || hint.name || ''
+          };
+          const key = JSON.stringify(normalized);
+          if ((!normalized.fileName && !normalized.componentName) || seen.has(key)) return;
+          seen.add(key);
+          hints.push(normalized);
+        };
+
+        let node = el;
+        while (node && node.nodeType === 1 && hints.length < 8) {
+          for (const key of Object.keys(node)) {
+            if (key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$')) {
+              let fiber = node[key];
+              let depth = 0;
+              while (fiber && depth < 12 && hints.length < 8) {
+                pushHint({
+                  ...(fiber._debugSource || {}),
+                  componentName: fiber.elementType?.displayName || fiber.elementType?.name || fiber.type?.displayName || fiber.type?.name || ''
+                });
+                fiber = fiber.return;
+                depth += 1;
+              }
+            }
+            if (key.startsWith('__vueParentComponent')) {
+              let component = node[key];
+              let depth = 0;
+              while (component && depth < 8 && hints.length < 8) {
+                pushHint({
+                  fileName: component.type?.__file || component.type?.__hmrId || '',
+                  componentName: component.type?.name || component.type?.__name || ''
+                });
+                component = component.parent;
+                depth += 1;
+              }
+            }
+          }
+          node = node.parentElement;
+        }
+        return hints;
+      };
+      const positionFloating = (el, x, y, floatingWidth, floatingHeight) => {
+        const rect = el?.getBoundingClientRect?.();
+        const anchorX = Number.isFinite(x) ? x : (rect ? rect.right + 10 : 16);
+        const anchorY = Number.isFinite(y) ? y : (rect ? rect.top : 16);
+        return {
+          left: Math.max(12, Math.min(anchorX, innerWidth - floatingWidth - 12)),
+          top: Math.max(12, Math.min(anchorY, innerHeight - floatingHeight - 12))
+        };
+      };
+      const showChat = (el, x, y) => {
+        window.__bananaElementPickerTarget = el;
+        hideMenu();
+        const pos = positionFloating(el, x, y, 330, 150);
+        chat.style.left = pos.left + 'px';
+        chat.style.top = pos.top + 'px';
+        chat.style.display = 'block';
+        chatInput.value = '';
+        setTimeout(() => chatInput.focus(), 0);
+      };
+      const elementPayload = (el) => {
+        const rect = el.getBoundingClientRect();
+        const computed = getComputedStyle(el);
+        const parent = el.parentElement;
+        return {
+          url: location.href,
+          origin: location.origin,
+          pathname: location.pathname,
+          title: document.title,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute('role') || '',
+          ariaLabel: el.getAttribute('aria-label') || '',
+          selector: selectorFor(el),
+          xpath: xpathFor(el),
+          id: el.id || '',
+          className: typeof el.className === 'string' ? el.className : '',
+          value: typeof el.value === 'string' ? el.value.slice(0, 2000) : '',
+          text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 2000),
+          outerHTML: (el.outerHTML || '').slice(0, 8000),
+          parentHTML: (parent?.outerHTML || '').slice(0, 8000),
+          attributes: attrsFor(el),
+          ancestry: ancestryFor(el),
+          sourceHints: sourceHintsFor(el),
+          rect: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) },
+          computed: {
+            display: computed.display,
+            position: computed.position,
+            color: computed.color,
+            backgroundColor: computed.backgroundColor,
+            fontSize: computed.fontSize,
+            fontWeight: computed.fontWeight,
+            lineHeight: computed.lineHeight,
+            fontFamily: computed.fontFamily,
+            margin: computed.margin,
+            padding: computed.padding,
+            borderRadius: computed.borderRadius
+          }
+        };
+      };
+      const setEnabled = (enabled) => {
+        window.__bananaElementPickerEnabled = Boolean(enabled);
+        badge.style.display = enabled ? 'block' : 'none';
+        if (!enabled) {
+          box.style.display = 'none';
+          hideMenu();
+          window.__bananaElementPickerTarget = null;
+        }
+        return window.__bananaElementPickerEnabled;
+      };
+
+      document.addEventListener('keydown', (event) => {
+        if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'e') {
+          event.preventDefault();
+          event.stopPropagation();
+          const enabled = setEnabled(!window.__bananaElementPickerEnabled);
+          console.log('__BANANA_EDIT_ELEMENT__' + JSON.stringify({ nonce: pickerNonce, type: 'picker_state', enabled }));
+        }
+      }, true);
+      document.addEventListener('mousemove', (event) => {
+        if (!window.__bananaElementPickerEnabled) return;
+        updateBox(event.target);
+      }, true);
+      document.addEventListener('scroll', () => {
+        if (window.__bananaElementPickerEnabled && window.__bananaElementPickerTarget) updateBox(window.__bananaElementPickerTarget);
+      }, true);
+      document.addEventListener('contextmenu', (event) => {
+        if (!window.__bananaElementPickerEnabled || isPickerUi(event.target)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        updateBox(event.target);
+        menu.style.left = Math.min(event.clientX, innerWidth - 170) + 'px';
+        menu.style.top = Math.min(event.clientY, innerHeight - 48) + 'px';
+        menu.style.display = 'block';
+      }, true);
+      document.addEventListener('click', (event) => {
+        if (!isPickerUi(event.target)) {
+          hideMenu();
+          hideChat();
+        }
+      }, true);
+      editButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const target = window.__bananaElementPickerTarget;
+        if (!target) return;
+        showChat(target, parseFloat(menu.style.left) || null, parseFloat(menu.style.top) || null);
+      });
+      chatCancel.addEventListener('click', (event) => {
+        event.preventDefault();
+        hideChat();
+      });
+      chat.addEventListener('submit', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const target = window.__bananaElementPickerTarget;
+        if (!target) return;
+        const instruction = chatInput.value.trim();
+        if (!instruction) {
+          chatInput.focus();
+          return;
+        }
+        console.log('__BANANA_EDIT_ELEMENT__' + JSON.stringify({ nonce: pickerNonce, element: elementPayload(target), instruction }));
+        hideChat();
+        setEnabled(false);
+      });
+      window.__bananaSetElementPickerEnabled = setEnabled;
+      return true;
+    })();
+  `);
+}
+
+async function toggleBrowserElementPicker() {
+  const webview = getBrowserWebview();
+  if (!webview || !state.browser.open) throw new Error('Open a browser page first.');
+  await injectBrowserElementPicker();
+  const enabled = await webview.executeJavaScript(`
+    (() => window.__bananaSetElementPickerEnabled?.(!window.__bananaElementPickerEnabled) ?? false)();
+  `);
+  state.browser.editMode = Boolean(enabled);
+  updateBrowserChrome();
+  showToast('info', enabled ? 'Element picker enabled. Hover, right-click, then choose Edit using AI.' : 'Element picker disabled.');
+}
+
+function addBrowserElementAttachment(element) {
+  const id = `browser-el-${Date.now()}`;
+  const attachment = { ...element, id };
+  state.browser.editMode = false;
+  state.browserElementAttachments.push(attachment);
+  renderAttachmentChips();
+  updateVoiceButtonState();
+  updateBrowserChrome();
+  const textarea = $('#message-input');
+  if (textarea && !textarea.value.trim()) {
+    textarea.value = 'Edit the selected browser element in the local source code. If this workspace does not contain the code for the page, explain what project or files are needed instead.';
+    textarea.dispatchEvent(new Event('input'));
+  }
+  textarea?.focus();
+  showToast('success', `Attached ${element.tag || 'element'} from browser`);
+}
+
+function submitBrowserElementEdit(element, instruction) {
+  const text = String(instruction || '').trim();
+  if (!text) return;
+  const attachment = { ...element, id: `browser-el-${Date.now()}` };
+  state.browser.editMode = false;
+  updateBrowserChrome();
+
+  const sent = submitChatMessage(text, [], [attachment]);
+  if (sent) {
+    showToast('success', `Sent edit for ${element.tag || 'element'}`);
+  }
+}
+
+async function moveBrowserCursor(x, y) {
+  const webview = getBrowserWebview();
+  state.browser.lastMouse = { x, y };
+  await injectBrowserCursor();
+  await waitForBrowserDomReady(5000);
+  if (!state.browser.domReady) return;
+  await webview.executeJavaScript(`
+    (() => {
+      const cursor = document.getElementById('banana-ai-cursor');
+      if (!cursor) return false;
+      cursor.style.transform = 'translate(${Number(x)}px, ${Number(y)}px)';
+      return true;
+    })();
+  `);
+  await delay(160);
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function onBrowserRequest(request) {
+  try {
+    const result = await runBrowserAction(request.action, request.params || {});
+    state.ws.respondBrowser(request.requestId, true, { result });
+  } catch (error) {
+    state.ws.respondBrowser(request.requestId, false, { error: error.message || String(error) });
+  }
+}
+
+async function runBrowserAction(action, params = {}) {
+  const browserUse = state.serverConfig?.browserUse || {};
+  if (browserUse.enabled === false) {
+    throw new Error('Browser Use is disabled in Studio settings.');
+  }
+
+  const webview = getBrowserWebview();
+  if (!webview) throw new Error('Browser webview is not available.');
+
+  if (action === 'close') {
+    $('#browser-panel')?.classList.add('hidden');
+    state.browser.open = false;
+    state.browser.loading = false;
+    state.browser.editMode = false;
+    syncBrowserState({ open: false });
+    return { ok: true, open: false };
+  }
+
+  await revealBrowserPanel();
+
+  switch (action) {
+    case 'open':
+      if (!params.url) throw new Error('browser_open requires a url.');
+      if (!isBrowserUrlAllowed(params.url)) throw new Error('Browser Use only supports HTTP and HTTPS URLs.');
+      await navigateBrowser(params.url);
+      return await collectBrowserObservation();
+    case 'snapshot':
+      return await collectBrowserObservation();
+    case 'click':
+      await browserClick(params);
+      await delay(450);
+      return await collectBrowserObservation();
+    case 'type':
+      await browserType(params.text || '');
+      await delay(250);
+      return await collectBrowserObservation();
+    case 'press':
+      await browserPress(params.key || '');
+      await delay(350);
+      return await collectBrowserObservation();
+    case 'scroll':
+      await browserScroll(params);
+      await delay(350);
+      return await collectBrowserObservation();
+    case 'back':
+      if (webview.canGoBack()) {
+        state.browser.domReady = false;
+        webview.goBack();
+        await waitForBrowserLoad();
+        await waitForBrowserDomReady(5000);
+      }
+      return await collectBrowserObservation();
+    case 'forward':
+      if (webview.canGoForward()) {
+        state.browser.domReady = false;
+        webview.goForward();
+        await waitForBrowserLoad();
+        await waitForBrowserDomReady(5000);
+      }
+      return await collectBrowserObservation();
+    case 'reload':
+      state.browser.domReady = false;
+      webview.reload();
+      await waitForBrowserLoad();
+      await waitForBrowserDomReady(5000);
+      return await collectBrowserObservation();
+    default:
+      throw new Error(`Unknown browser action: ${action}`);
+  }
+}
+
+async function browserClick(params = {}) {
+  const webview = getBrowserWebview();
+  await waitForBrowserDomReady(5000);
+  if (!state.browser.domReady) throw new Error('Browser page is not ready for clicking yet.');
+  let point = null;
+  if (params.ref) {
+    point = await webview.executeJavaScript(`
+      (() => {
+        const el = window.__bananaBrowserRefs?.[${JSON.stringify(params.ref)}];
+        if (!el) return null;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        if (typeof el.focus === 'function') el.focus({ preventScroll: true });
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      })();
+    `);
+    if (!point) throw new Error(`Browser element ref not found: ${params.ref}`);
+  } else if (Number.isFinite(params.x) && Number.isFinite(params.y)) {
+    point = { x: Number(params.x), y: Number(params.y) };
+  } else {
+    throw new Error('browser_click requires either ref or x/y coordinates.');
+  }
+
+  const x = Math.round(point.x);
+  const y = Math.round(point.y);
+  await moveBrowserCursor(x, y);
+  webview.focus();
+  webview.sendInputEvent({ type: 'mouseMove', x, y });
+  webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+}
+
+async function browserType(text) {
+  const webview = getBrowserWebview();
+  webview.focus();
+  for (const char of String(text)) {
+    if (char === '\n') {
+      await browserPress('Enter');
+    } else {
+      webview.sendInputEvent({ type: 'char', keyCode: char });
+    }
+    await delay(12);
+  }
+}
+
+async function browserPress(key) {
+  const webview = getBrowserWebview();
+  const keyCode = String(key || '').trim();
+  if (!keyCode) throw new Error('browser_press requires a key.');
+  webview.focus();
+  webview.sendInputEvent({ type: 'keyDown', keyCode });
+  webview.sendInputEvent({ type: 'keyUp', keyCode });
+}
+
+async function browserScroll(params = {}) {
+  const webview = getBrowserWebview();
+  const deltaX = Number.isFinite(params.deltaX) ? Number(params.deltaX) : 0;
+  const deltaY = Number.isFinite(params.deltaY) ? Number(params.deltaY) : 600;
+  const { x, y } = state.browser.lastMouse || { x: 80, y: 80 };
+  await moveBrowserCursor(x, y);
+  webview.focus();
+  webview.sendInputEvent({ type: 'mouseWheel', x, y, deltaX, deltaY: -deltaY });
+  await waitForBrowserDomReady(5000);
+  if (!state.browser.domReady) return;
+  await webview.executeJavaScript(`window.scrollBy(${deltaX}, ${deltaY}); true;`);
+}
+
+async function collectBrowserObservation() {
+  const webview = getBrowserWebview();
+  await waitForBrowserDomReady(10000);
+  if (!state.browser.domReady) {
+    throw new Error('Browser page is not ready yet. Try browser_snapshot again after the page finishes loading.');
+  }
+  await injectBrowserCursor();
+  const snapshot = await webview.executeJavaScript(`
+    (() => {
+      const isVisible = (el) => {
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+      };
+      const labelFor = (el) => {
+        const labelledBy = el.getAttribute('aria-labelledby');
+        const labelledText = labelledBy ? labelledBy.split(/\\s+/).map(id => document.getElementById(id)?.innerText || '').join(' ').trim() : '';
+        return (
+          el.getAttribute('aria-label') ||
+          labelledText ||
+          el.getAttribute('title') ||
+          el.getAttribute('placeholder') ||
+          el.innerText ||
+          el.value ||
+          el.name ||
+          el.id ||
+          el.href ||
+          el.tagName
+        ).toString().replace(/\\s+/g, ' ').trim().slice(0, 160);
+      };
+      const selector = [
+        'a[href]',
+        'button',
+        'input',
+        'textarea',
+        'select',
+        '[role="button"]',
+        '[role="link"]',
+        '[contenteditable="true"]',
+        '[onclick]'
+      ].join(',');
+      window.__bananaBrowserRefs = {};
+      const elements = Array.from(document.querySelectorAll(selector))
+        .filter(isVisible)
+        .slice(0, 80)
+        .map((el, index) => {
+          const rect = el.getBoundingClientRect();
+          const ref = 'b' + (index + 1);
+          window.__bananaBrowserRefs[ref] = el;
+          return {
+            ref,
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute('role') || '',
+            label: labelFor(el),
+            href: el.href || '',
+            type: el.getAttribute('type') || '',
+            checked: Boolean(el.checked),
+            disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+            rect: {
+              x: Math.round(rect.left),
+              y: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height)
+            }
+          };
+        });
+      return {
+        url: location.href,
+        title: document.title,
+        text: (document.body?.innerText || document.documentElement?.innerText || '').replace(/\\s+\\n/g, '\\n').slice(0, 12000),
+        elements,
+        viewport: { width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio },
+        scroll: { x: scrollX, y: scrollY, maxY: Math.max(0, document.documentElement.scrollHeight - innerHeight) }
+      };
+    })();
+  `);
+
+  state.browser.refs = Object.fromEntries((snapshot.elements || []).map(el => [el.ref, el]));
+  state.browser.url = snapshot.url || '';
+  state.browser.title = snapshot.title || '';
+  state.browser.loading = false;
+  syncBrowserState();
+
+  let screenshot = null;
+  try {
+    const image = await webview.capturePage();
+    const dataUrl = image.toDataURL();
+    const base64 = dataUrl.split(',')[1] || '';
+    screenshot = {
+      mimeType: 'image/png',
+      base64,
+      width: image.getSize().width,
+      height: image.getSize().height
+    };
+  } catch (error) {
+    screenshot = { error: error.message };
+  }
+
+  return { ...snapshot, screenshot };
+}
+
 // ── Input ──
 function setupInput() {
   const textarea = $('#message-input');
@@ -1306,16 +2312,30 @@ async function addAttachments() {
 function renderAttachmentChips() {
   const container = $('#attachment-chips');
   if (!container) return;
-  container.innerHTML = state.attachments.map((attachment, index) => {
+  const fileChips = state.attachments.map((attachment, index) => {
     const name = attachment.path.split(/[\\/]/).pop();
-    return `<button class="attachment-chip" type="button" data-index="${index}" title="${escapeAttr(attachment.path)}">
+    return `<button class="attachment-chip" type="button" data-attachment-index="${index}" title="${escapeAttr(attachment.path)}">
       <span>${escapeHtml(name)}</span><span class="attachment-remove">×</span>
     </button>`;
-  }).join('');
-  container.classList.toggle('empty', state.attachments.length === 0);
-  container.querySelectorAll('.attachment-chip').forEach(chip => {
+  });
+  const elementChips = state.browserElementAttachments.map((element, index) => {
+    const label = `${element.tag || 'element'}${element.id ? `#${element.id}` : ''}${element.className ? `.${String(element.className).split(/\s+/).filter(Boolean)[0]}` : ''}`;
+    return `<button class="attachment-chip browser-element-chip" type="button" data-browser-element-index="${index}" title="${escapeAttr(element.selector || element.xpath || element.url || '')}">
+      <span>${escapeHtml(label)}</span><span class="attachment-remove">×</span>
+    </button>`;
+  });
+  container.innerHTML = [...fileChips, ...elementChips].join('');
+  container.classList.toggle('empty', state.attachments.length === 0 && state.browserElementAttachments.length === 0);
+  container.querySelectorAll('[data-attachment-index]').forEach(chip => {
     chip.addEventListener('click', () => {
-      state.attachments.splice(Number(chip.dataset.index), 1);
+      state.attachments.splice(Number(chip.dataset.attachmentIndex), 1);
+      renderAttachmentChips();
+      updateVoiceButtonState();
+    });
+  });
+  container.querySelectorAll('[data-browser-element-index]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      state.browserElementAttachments.splice(Number(chip.dataset.browserElementIndex), 1);
       renderAttachmentChips();
       updateVoiceButtonState();
     });
@@ -1329,7 +2349,7 @@ async function handleVoiceButtonClick() {
   }
 
   const textarea = $('#message-input');
-  if (textarea.value.trim() || state.attachments.length > 0) {
+  if (textarea.value.trim() || state.attachments.length > 0 || state.browserElementAttachments.length > 0) {
     showToast('info', 'Voice input starts from an empty message.');
     textarea.focus();
     return;
@@ -1492,7 +2512,7 @@ function updateVoiceButtonState() {
   const btn = $('#btn-voice');
   if (!btn) return;
   const textarea = $('#message-input');
-  const blockedByContent = Boolean(textarea.value.trim() || state.attachments.length > 0);
+  const blockedByContent = Boolean(textarea.value.trim() || state.attachments.length > 0 || state.browserElementAttachments.length > 0);
   const voice = state.serverConfig?.voice || {};
   const isSetup = Boolean(voice.groqApiKey && voice.model);
   const isEnabled = voice.enabled !== false;
@@ -1514,23 +2534,37 @@ function updateVoiceButtonState() {
   btn.setAttribute('aria-label', btn.title);
 }
 
-function sendMessage() {
-  const textarea = $('#message-input');
-  const text = textarea.value.trim();
-  if ((!text && state.attachments.length === 0) || state.isStreaming) return;
+function submitChatMessage(text, attachments = [], browserElements = []) {
+  if ((!text && attachments.length === 0 && browserElements.length === 0) || state.isStreaming) return false;
   if (!state.currentSessionId) state.pendingWorkspacePath = state.workspacePath;
 
-  const attachments = state.attachments.map(a => ({ path: a.path }));
   const attachmentLabel = attachments.length
     ? `\n\n${attachments.map(a => `Attached: ${a.path.split(/[\\/]/).pop()}`).join('\n')}`
     : '';
-  addMessageBubble('user', (text || 'Attachment context') + attachmentLabel);
-  state.ws.sendChat(text, attachments);
+  const browserElementLabel = browserElements.length
+    ? `\n\n${browserElements.map(element => `Browser element: <${element.tag || 'element'}> ${element.selector || element.xpath || ''}`).join('\n')}`
+    : '';
+  if (!state.ws.sendChat(text, attachments, browserElements)) {
+    showToast('error', 'Not connected to Banana Code API');
+    return false;
+  }
+  addMessageBubble('user', (text || 'Attachment context') + attachmentLabel + browserElementLabel);
+  setInputEnabled(false);
+  return true;
+}
+
+function sendMessage() {
+  const textarea = $('#message-input');
+  const text = textarea.value.trim();
+  const attachments = state.attachments.map(a => ({ path: a.path }));
+  const browserElements = state.browserElementAttachments.map(element => ({ ...element }));
+  if (!submitChatMessage(text, attachments, browserElements)) return;
+
   textarea.value = '';
   textarea.style.height = 'auto';
   state.attachments = [];
+  state.browserElementAttachments = [];
   renderAttachmentChips();
-  setInputEnabled(false);
 }
 
 function setInputEnabled(enabled) {
@@ -1884,9 +2918,20 @@ function showNextPermission() {
     return;
   }
   state.currentPermission = state.permissionQueue.shift();
-  $('#permission-action').textContent = state.currentPermission.action;
-  $('#permission-details').textContent = state.currentPermission.details;
-  $('#permission-modal').classList.remove('hidden');
+  const actionEl = $('#permission-action');
+  const detailsEl = $('#permission-details');
+  const modalOverlay = $('#permission-modal');
+  const modal = modalOverlay?.querySelector('.modal');
+  const action = state.currentPermission.action || '';
+  const details = state.currentPermission.details || '';
+  const isLargeDiff = details.length > 1800 || /(^|\n)@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@/.test(details) || /(^|\n)[+-]{3}\s/.test(details);
+
+  actionEl.textContent = action;
+  detailsEl.textContent = details;
+  detailsEl.scrollTop = 0;
+  detailsEl.scrollLeft = 0;
+  modal?.classList.toggle('diff-modal', isLargeDiff);
+  modalOverlay.classList.remove('hidden');
 }
 
 function respondPermission(allowed, session) {
@@ -2115,6 +3160,35 @@ function renderSettingsTab(tab) {
 
       state.ws.setImageGen(nextConfig);
       showToast('info', nextConfig.enabled ? 'Saving ImageGen settings...' : 'Disabling ImageGen...');
+    });
+  } else if (tab === 'browser') {
+    const browserUse = state.serverConfig?.browserUse || {};
+    const enabled = browserUse.enabled !== false;
+    body.innerHTML = `<div class="settings-section"><h3>Browser Use</h3>
+      <div class="toggle-container"><span class="toggle-label">Enable AI browser tool in Studio</span>
+        <div class="toggle${enabled ? ' active' : ''}" id="toggle-browser-use"></div></div>
+      <div class="test-result ${enabled ? 'success' : 'warning'}">${enabled ? 'The AI can open and control the visible Studio browser from chat.' : 'Browser tools are hidden from new AI turns.'}</div>
+      <button class="btn-settings-action" id="btn-save-browser" style="width:100%;margin-top:14px">Save Browser Use Settings</button>
+    </div>
+    <div class="settings-section"><h3>Browser Data</h3>
+      <p class="settings-help">Clears cookies, cache, storage, and session data for the isolated Studio browser profile.</p>
+      <button class="btn-settings-action secondary" id="btn-clear-browser-data" style="width:100%;margin-top:12px">Clear Browser Data</button>
+    </div>`;
+
+    $('#toggle-browser-use').addEventListener('click', () => $('#toggle-browser-use').classList.toggle('active'));
+    $('#btn-save-browser').addEventListener('click', () => {
+      const nextConfig = { enabled: $('#toggle-browser-use').classList.contains('active') };
+      state.ws.updateConfig({ browserUse: nextConfig }, true);
+      showToast('success', nextConfig.enabled ? 'Browser Use enabled' : 'Browser Use disabled');
+    });
+    $('#btn-clear-browser-data').addEventListener('click', async () => {
+      try {
+        await window.studioAPI.clearBrowserData();
+        getBrowserWebview()?.reload();
+        showToast('success', 'Browser data cleared');
+      } catch (error) {
+        showToast('error', `Could not clear browser data: ${error.message}`);
+      }
     });
   } else if (tab === 'modes') {
     const isGuard = state.permMode === 'guard';

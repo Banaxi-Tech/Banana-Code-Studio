@@ -187,6 +187,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       sandbox: false, // needed for preload to use require()
     },
     show: false, // show after ready-to-show to avoid flash
@@ -285,6 +286,13 @@ ipcMain.handle('window-is-maximized', () => {
 
 ipcMain.handle('get-platform', () => {
   return process.platform;
+});
+
+ipcMain.handle('clear-browser-data', async () => {
+  const browserSession = session.fromPartition('persist:banana-browser');
+  await browserSession.clearStorageData();
+  await browserSession.clearCache();
+  return true;
 });
 
 // Navigate renderer to a different page (used after setup wizard completes)
