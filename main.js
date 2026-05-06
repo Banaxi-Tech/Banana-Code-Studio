@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -193,9 +193,20 @@ function createWindow() {
     show: false, // show after ready-to-show to avoid flash
   });
 
-  mainWindow.once('ready-to-show', () => {
+  let didShowWindow = false;
+  const showMainWindow = () => {
+    if (didShowWindow || mainWindow.isDestroyed()) return;
+    didShowWindow = true;
     mainWindow.show();
+    mainWindow.focus();
+  };
+  mainWindow.once('ready-to-show', showMainWindow);
+  mainWindow.webContents.once('did-finish-load', showMainWindow);
+  mainWindow.webContents.once('did-fail-load', (_event, errorCode, errorDescription) => {
+    console.error('[Window] Failed to load renderer:', errorCode, errorDescription);
+    showMainWindow();
   });
+  setTimeout(showMainWindow, 3000);
 
   // Save window state on close
   mainWindow.on('close', () => {
@@ -311,12 +322,10 @@ app.whenReady().then(async () => {
     callback(false);
   });
 
-  if (process.platform === 'darwin') {
-    await systemPreferences.askForMediaAccess('microphone').catch(() => false);
-  }
-
-  await startBananaApiServerIfAvailable();
   createWindow();
+  startBananaApiServerIfAvailable().catch((error) => {
+    console.error('[Banana API] Startup check failed:', error);
+  });
 });
 
 app.on('before-quit', () => {
