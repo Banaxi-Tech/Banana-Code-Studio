@@ -162,7 +162,12 @@ export class WSClient {
         break;
 
       case 'done':
-        this.emit('done', { finalResponse: data.finalResponse, usage: data.usage, sessionId: data.sessionId });
+        this.emit('done', {
+          finalResponse: data.finalResponse,
+          usage: data.usage,
+          sessionId: data.sessionId,
+          generatedImages: data.generatedImages || [],
+        });
         break;
 
       case 'permission_requested':
@@ -237,6 +242,22 @@ export class WSClient {
         this.emit('codexLoginFinished', data);
         break;
 
+      case 'imagegen_models':
+        this.emit('imagegenModels', data);
+        break;
+
+      case 'image_generation_progress':
+        this.emit('imageGenerationProgress', data);
+        break;
+
+      case 'image_generation_result':
+        this.emit('imageGenerationResult', data);
+        break;
+
+      case 'attachments_dropped':
+        this.emit('attachmentsDropped', data.attachments || []);
+        break;
+
       default:
         console.log('[WS] Unknown message type:', data.type);
     }
@@ -261,6 +282,8 @@ export class WSClient {
   listBetaFeatures() { return this.send('list_beta_features'); }
   setBetaFeatures(features) { return this.send('set_beta_features', { features }); }
   setBananaSplit(config) { return this.send('set_banana_split', { config }); }
+  listImageGenModels(baseUrl) { return this.send('list_imagegen_models', { baseUrl }); }
+  setImageGen(config) { return this.send('set_imagegen', { config }); }
   listSessions() { return this.send('list_sessions'); }
   loadSession(sessionId) { return this.send('load_session', { sessionId }); }
   clearHistory() { return this.send('clear_history'); }

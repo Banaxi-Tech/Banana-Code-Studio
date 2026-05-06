@@ -13,6 +13,7 @@ const RECENT_WORKSPACES_KEY = 'recentWorkspaces';
 const SESSION_WORKSPACES_KEY = 'sessionWorkspaces';
 const COLLAPSED_PROJECTS_KEY = 'collapsedProjects';
 const MAX_RECENT_WORKSPACES = 8;
+const DEFAULT_IMAGEGEN_BASE_URL = 'http://127.0.0.1:8000';
 const VOICE_MODELS = [
   { value: 'whisper-large-v3-turbo', label: 'Whisper Large V3 Turbo' },
   { value: 'whisper-large-v3', label: 'Whisper Large V3' },
@@ -49,6 +50,9 @@ const state = {
   contextInfo: null,
   permissions: [],
   betaFeatures: [],
+  imageGenModels: null,
+  imageGenCards: new Map(),
+  renderedImageGenRequestIds: new Set(),
 };
 
 // ── Init ──
@@ -137,6 +141,10 @@ function connectWebSocket() {
   ws.on('contextInfo', onContextInfo);
   ws.on('permissionsList', onPermissionsList);
   ws.on('betaFeatures', onBetaFeatures);
+  ws.on('imagegenModels', onImageGenModels);
+  ws.on('imageGenerationProgress', onImageGenerationProgress);
+  ws.on('imageGenerationResult', onImageGenerationResult);
+  ws.on('attachmentsDropped', onAttachmentsDropped);
   ws.on('terminalOutput', (data) => console.log('[terminal_output]', data));
   ws.on('authFailure', () => showToast('error', 'Auth failed. Check settings.'));
   ws.on('error', (msg) => showToast('error', `Server Error: ${msg}`));
@@ -166,7 +174,7 @@ function onConfigUpdated(config) {
   updateModeTrigger();
   updateOperatingModeTrigger();
   updateVoiceButtonState();
-  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'voice', 'bananasplit'].includes(currentSettingsTab)) {
+  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'voice', 'imagegen', 'bananasplit'].includes(currentSettingsTab)) {
     renderSettingsTab(currentSettingsTab);
   }
 }
@@ -376,6 +384,13 @@ function emptyStateHtml() {
 function clearMessages() {
   const container = $('#messages-container');
   container.innerHTML = emptyStateHtml();
+  resetImageGenRenderState();
+}
+
+function resetImageGenRenderState() {
+  state.imageGenCards.clear();
+  state.renderedImageGenRequestIds.clear();
+  state._activeImageToolCard = null;
 }
 
 function onSessionsList(sessions) {
@@ -505,6 +520,7 @@ function onSessionLoaded(data) {
   if (loadedWorkspace) rememberSessionWorkspace(data.sessionId, loadedWorkspace);
   const container = $('#messages-container');
   container.innerHTML = '';
+  resetImageGenRenderState();
   $('#empty-state')?.remove();
   
   const msgs = data.messages || [];
@@ -752,13 +768,31 @@ function onToolStart(tool) {
   card.id = `tool-${Date.now()}`;
   const name = typeof tool === 'string' ? tool : (tool?.name || tool?.type || 'tool');
   const input = typeof tool === 'object' ? JSON.stringify(tool.input || tool, null, 2) : '';
+  const isImageTool = isGenerateImageTool(name);
+  const showInlineImagePreview = isImageTool && isImageGenRealtimeEnabled();
+  card.className = `tool-card running${showInlineImagePreview ? ' image-tool-card expanded' : ''}`;
   card.innerHTML = `<div class="tool-card-header" onclick="this.parentElement.classList.toggle('expanded')">
     <span>🔧</span><span class="tool-card-name">${escapeHtml(name)}</span>
     <div class="tool-spinner"></div><span class="tool-card-chevron">▸</span>
-  </div><div class="tool-card-body">${escapeHtml(input)}</div>`;
+  </div><div class="tool-card-body">${showInlineImagePreview ? imageToolLivePreviewHtml(input) : escapeHtml(input)}</div>`;
   container.appendChild(card);
   container.scrollTop = container.scrollHeight;
   state._lastToolCard = card;
+
+  if (showInlineImagePreview) {
+    state._activeImageToolCard = card;
+    const toolPayload = parseToolPayload(tool);
+    updateImageGenCardProgress({
+      requestId: 'pending-imagegen',
+      phase: 'queued',
+      prompt: toolPayload.prompt,
+      model: toolPayload.model || getImageGenConfig().model,
+      steps: toolPayload.steps || toolPayload.num_inference_steps,
+      message: 'Waiting for first live preview...'
+    });
+  } else if (isImageTool) {
+    state._activeImageToolCard = null;
+  }
 }
 
 function onToolEnd(result) {
@@ -770,6 +804,13 @@ function onToolEnd(result) {
   const spinner = card.querySelector('.tool-spinner');
   if (spinner) spinner.outerHTML = `<span>${isError ? '✗' : '✓'}</span>`;
   const body = card.querySelector('.tool-card-body');
+  if (card.classList.contains('image-tool-card')) {
+    if (isError && body && result) {
+      const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      body.insertAdjacentHTML('beforeend', `<pre class="image-tool-error">${escapeHtml(text.substring(0, 2000))}</pre>`);
+    }
+    return;
+  }
   if (body && result) {
     const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
     body.textContent = text.substring(0, 2000);
@@ -822,9 +863,406 @@ function onDone(data) {
   state.isStreaming = false;
   state.streamingText = '';
   state.streamingEl = null;
+  if (Array.isArray(data.generatedImages) && data.generatedImages.length > 0) {
+    renderGeneratedImagesFromDone(data.generatedImages);
+  }
   setInputEnabled(true);
   state.ws.listSessions();
   if (state.serverConfig?.showTokenCount) state.ws.getContext();
+}
+
+// ── Image Generation Rendering ──
+function getImageGenConfig() {
+  return state.serverConfig?.imageGen || {};
+}
+
+function isImageGenRealtimeEnabled() {
+  return getImageGenConfig().realtimeProgress !== false;
+}
+
+function onAttachmentsDropped(attachments) {
+  if (!attachments.length) return;
+  showToast('warning', `${attachments.length} attachment${attachments.length === 1 ? '' : 's'} could not be read.`);
+}
+
+function onImageGenModels(data) {
+  state.imageGenModels = data;
+  if ($('#settings-panel')?.classList.contains('open') && currentSettingsTab === 'imagegen') {
+    const baseUrlInput = $('#imagegen-base-url');
+    const modelInput = $('#imagegen-model');
+    const modelList = $('#imagegen-model-list');
+    const models = Array.isArray(data.models) ? data.models : [];
+    if (baseUrlInput && data.baseUrl) baseUrlInput.value = data.baseUrl;
+    if (modelInput && !modelInput.value.trim() && models[0]) modelInput.value = models[0];
+    if (modelList) {
+      const selected = modelInput?.value || getImageGenConfig().model || '';
+      modelList.innerHTML = models.map(model => `<button class="imagegen-model-choice${model === selected ? ' active' : ''}" type="button" data-model="${escapeAttr(model)}">${escapeHtml(model)}</button>`).join('');
+      wireImageGenModelChoiceHandlers(modelList);
+    }
+  }
+  showToast('success', data.models?.length ? `Found ${data.models.length} ImageGen model${data.models.length === 1 ? '' : 's'}` : 'No ImageGen models found');
+}
+
+function wireImageGenModelChoiceHandlers(root = document) {
+  root.querySelectorAll('[data-model]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $('#imagegen-model').value = btn.dataset.model;
+      $('#imagegen-model-list')?.querySelectorAll('[data-model]').forEach(choice => choice.classList.toggle('active', choice === btn));
+    });
+  });
+}
+
+function fileUrlFromPath(filePath) {
+  if (!filePath) return '';
+  const normalized = String(filePath).replace(/\\/g, '/');
+  const prefix = /^[a-zA-Z]:\//.test(normalized) ? 'file:///' : 'file://';
+  const encodedPath = normalized
+    .split('/')
+    .map((part, index) => index === 0 && /^[a-zA-Z]:$/.test(part) ? part : encodeURIComponent(part))
+    .join('/');
+  return prefix + encodedPath;
+}
+
+function absoluteImageUrl(rawUrl, baseUrl) {
+  if (!rawUrl) return '';
+  const url = String(rawUrl);
+  if (/^(https?:|file:|data:)/i.test(url)) return url;
+  try {
+    return new URL(url, baseUrl || getImageGenConfig().baseUrl || DEFAULT_IMAGEGEN_BASE_URL).toString();
+  } catch {
+    return url;
+  }
+}
+
+function cacheBustUrl(url, cacheKey) {
+  if (!url || !cacheKey || /^data:/i.test(url)) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}_bc_preview=${encodeURIComponent(cacheKey)}`;
+}
+
+function imagePreviewUrl(image = {}, { preferPath = false, baseUrl, cacheKey } = {}) {
+  let url = '';
+  if (image.b64_json) {
+    return `data:${image.mime_type || 'image/png'};base64,${image.b64_json}`;
+  }
+  if (image.base64) {
+    return `data:${image.mime_type || image.mimeType || 'image/png'};base64,${image.base64}`;
+  }
+  if (preferPath && image.path) url = fileUrlFromPath(image.path);
+  else if (image.url) url = absoluteImageUrl(image.url, baseUrl);
+  else if (image.preview_url) url = absoluteImageUrl(image.preview_url, baseUrl);
+  else if (image.previewUrl) url = absoluteImageUrl(image.previewUrl, baseUrl);
+  else if (image.image_url) url = absoluteImageUrl(image.image_url, baseUrl);
+  else if (image.imageUrl) url = absoluteImageUrl(image.imageUrl, baseUrl);
+  else if (image.path) url = fileUrlFromPath(image.path);
+  return cacheBustUrl(url, cacheKey);
+}
+
+function imageGenStatusText(payload = {}) {
+  if (payload.ok || payload.images) {
+    const count = Array.isArray(payload.images) ? payload.images.length : 0;
+    return count ? `Saved ${count} image${count === 1 ? '' : 's'}` : 'Completed';
+  }
+  if (payload.phase === 'queued') return 'Waiting for first preview';
+  if (payload.phase === 'start') return 'Starting stream';
+  if (payload.step || payload.total) {
+    const step = payload.step || '?';
+    const total = payload.total || '?';
+    const percent = Number.isFinite(Number(payload.percent)) ? ` (${Math.round(Number(payload.percent))}%)` : '';
+    return `Step ${step}/${total}${percent}`;
+  }
+  return payload.phase ? String(payload.phase) : 'Generating';
+}
+
+function imageGenPercent(payload = {}) {
+  const explicit = Number(payload.percent);
+  if (Number.isFinite(explicit)) return Math.max(0, Math.min(100, explicit));
+  const step = Number(payload.step);
+  const total = Number(payload.total);
+  if (Number.isFinite(step) && Number.isFinite(total) && total > 0) {
+    return Math.max(0, Math.min(100, (step / total) * 100));
+  }
+  return 0;
+}
+
+function imagePayloadPreview(payload = {}) {
+  const image = payload.image
+    || payload.preview
+    || payload.progress_image
+    || payload.progressImage
+    || payload.frame
+    || payload.sample
+    || payload.artifact
+    || payload.images?.[0]
+    || payload.data?.[0]
+    || payload.output?.[0]
+    || (payload.url
+      || payload.b64_json
+      || payload.base64
+      || payload.preview_url
+      || payload.previewUrl
+      || payload.image_url
+      || payload.imageUrl
+      || payload.path
+      ? payload
+      : null);
+  if (!image) return '';
+  const url = imagePreviewUrl(image, {
+    baseUrl: payload.baseUrl || getImageGenConfig().baseUrl,
+    cacheKey: imageGenStepKey(payload)
+  });
+  return url ? `<img src="${escapeAttr(url)}" alt="Image generation preview">` : '';
+}
+
+function renderImageGrid(images = [], payload = {}) {
+  return images.map((image, index) => {
+    const src = imagePreviewUrl(image, { preferPath: true, baseUrl: payload.baseUrl || getImageGenConfig().baseUrl });
+    const label = image.path || image.url || `Image ${index + 1}`;
+    return `<figure class="imagegen-result">
+      <div class="imagegen-image-frame">${src ? `<img src="${escapeAttr(src)}" alt="Generated image ${index + 1}">` : ''}</div>
+      <figcaption title="${escapeAttr(label)}">${escapeHtml(label)}</figcaption>
+    </figure>`;
+  }).join('');
+}
+
+function imageGenStepKey(payload = {}) {
+  return [
+    payload.phase || 'progress',
+    payload.step ?? '',
+    payload.total ?? '',
+    payload.percent ?? ''
+  ].join(':');
+}
+
+function imageGenStepText(payload = {}) {
+  if (payload.phase === 'queued') return payload.message || 'Waiting for first live preview';
+  if (payload.phase === 'start') return 'Started generation';
+  if (payload.phase === 'fallback') return payload.message || 'Realtime stream unavailable, waiting for final image';
+  if (payload.step || payload.total) return imageGenStatusText(payload);
+  return payload.message || imageGenStatusText(payload);
+}
+
+function imageToolLivePreviewHtml(input = '') {
+  return `<div class="image-tool-live">
+    <div class="image-tool-live-title">Starting</div>
+    <div class="imagegen-prompt"></div>
+    <div class="imagegen-progress-track"><div class="imagegen-progress-fill"></div></div>
+    <div class="imagegen-preview-frame has-preview"><div class="imagegen-preview"><div class="imagegen-preview-placeholder">Starting image preview now...</div></div></div>
+    <div class="imagegen-steps"></div>
+    <div class="imagegen-meta"></div>
+    ${input ? `<details class="image-tool-input"><summary>Tool input</summary><pre>${escapeHtml(input)}</pre></details>` : ''}
+  </div>`;
+}
+
+function applyImageGenProgressToCard(card, payload = {}, { isFinal = false } = {}) {
+  if (!card) return;
+  const title = card.querySelector('.image-tool-live-title') || card.querySelector('.imagegen-title');
+  const status = card.querySelector('.imagegen-card-status');
+  const prompt = card.querySelector('.imagegen-prompt');
+  const fill = card.querySelector('.imagegen-progress-fill');
+  const preview = card.querySelector('.imagegen-preview');
+  const previewFrame = card.querySelector('.imagegen-preview-frame');
+  const steps = card.querySelector('.imagegen-steps');
+  const meta = card.querySelector('.imagegen-meta');
+
+  const statusText = imageGenStatusText(payload);
+  if (title) {
+    if (title.classList.contains('imagegen-title') && payload.model) {
+      title.textContent = `ImageGen · ${payload.model}`;
+    } else {
+      title.textContent = statusText;
+    }
+  }
+  if (status) status.textContent = statusText;
+  if (prompt && payload.prompt) prompt.textContent = payload.prompt;
+  if (fill) fill.style.width = `${isFinal ? 100 : imageGenPercent(payload)}%`;
+
+  const finalImages = Array.isArray(payload.images) && payload.images.length > 0;
+  const previewHtml = finalImages
+    ? renderImageGrid(payload.images, payload)
+    : imagePayloadPreview(payload);
+
+  if (previewHtml && preview) {
+    preview.innerHTML = previewHtml;
+    previewFrame?.classList.add('has-preview');
+    previewFrame?.classList.remove('waiting');
+    if (finalImages || isFinal) {
+      previewFrame?.classList.add('final');
+    }
+  } else if (isFinal && preview) {
+    preview.innerHTML = renderImageGrid(payload.images || [], payload);
+    previewFrame?.classList.add('has-preview', 'final');
+    previewFrame?.classList.remove('waiting');
+  }
+
+  if (steps && !finalImages && !isFinal) {
+    appendImageGenStep(steps, payload, previewHtml);
+  }
+
+  if (meta) {
+    if (isFinal) {
+      meta.textContent = payload.requestId || '';
+    } else {
+      const bits = [];
+      if (payload.step || payload.total) bits.push(`step ${payload.step || '?'}/${payload.total || '?'}`);
+      if (payload.seed !== undefined) bits.push(`seed ${payload.seed}`);
+      if (payload.requestId) bits.push(payload.requestId);
+      meta.textContent = bits.join(' · ');
+    }
+  }
+}
+
+function updateActiveImageToolPreview(payload = {}) {
+  applyImageGenProgressToCard(state._activeImageToolCard, payload);
+}
+
+function isGenerateImageTool(name = '') {
+  return /^(generate_image|Generate Image|ImageGen)$/i.test(String(name).trim());
+}
+
+function parseToolPayload(tool) {
+  if (!tool || typeof tool !== 'object') return {};
+  const raw = tool.input || tool.arguments || tool.function?.arguments || tool;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+function ensureImageGenCard(payload = {}) {
+  const requestId = payload.requestId || payload.id || 'latest';
+  let card = state.imageGenCards.get(requestId);
+  if (card) return card;
+  if (requestId !== 'pending-imagegen' && state.imageGenCards.has('pending-imagegen')) {
+    card = state.imageGenCards.get('pending-imagegen');
+    state.imageGenCards.delete('pending-imagegen');
+    state.imageGenCards.set(requestId, card);
+    card.dataset.requestId = requestId;
+    return card;
+  }
+
+  $('#empty-state')?.remove();
+  const container = $('#messages-container');
+  card = document.createElement('div');
+  card.className = 'imagegen-card running';
+  card.dataset.requestId = requestId;
+  card.innerHTML = `<div class="imagegen-card-header">
+    <span class="imagegen-badge">IMG</span>
+    <span class="imagegen-title">ImageGen</span>
+    <span class="imagegen-card-status">Starting</span>
+    <div class="tool-spinner"></div>
+  </div>
+  <div class="imagegen-card-body">
+    <div class="imagegen-prompt"></div>
+    <div class="imagegen-progress-track"><div class="imagegen-progress-fill"></div></div>
+    <div class="imagegen-preview-frame has-preview"><div class="imagegen-preview"><div class="imagegen-preview-placeholder">Waiting for first live preview...</div></div></div>
+    <div class="imagegen-steps"></div>
+    <div class="imagegen-meta"></div>
+  </div>`;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+  state.imageGenCards.set(requestId, card);
+  return card;
+}
+
+function updateImageGenCardProgress(payload = {}) {
+  if (state._activeImageToolCard) {
+    updateActiveImageToolPreview(payload);
+    return;
+  }
+  applyImageGenProgressToCard(ensureImageGenCard(payload), payload);
+}
+
+function appendImageGenStep(steps, payload = {}, previewHtml = '') {
+  const key = imageGenStepKey(payload);
+  if (key === steps.dataset.lastStepKey) return;
+  steps.dataset.lastStepKey = key;
+
+  const item = document.createElement('div');
+  item.className = `imagegen-step${previewHtml ? ' has-preview' : ''}`;
+  item.innerHTML = `<span class="imagegen-step-dot"></span>
+    <div class="imagegen-step-text">${escapeHtml(imageGenStepText(payload))}</div>
+    ${previewHtml ? `<div class="imagegen-step-thumb">${previewHtml}</div>` : ''}`;
+  steps.appendChild(item);
+
+  while (steps.children.length > 12) {
+    steps.removeChild(steps.firstElementChild);
+  }
+}
+
+function onImageGenerationProgress(payload = {}) {
+  if (!isImageGenRealtimeEnabled()) return;
+  updateImageGenCardProgress(payload);
+}
+
+function onImageGenerationResult(payload = {}) {
+  if (state._activeImageToolCard) {
+    const toolCard = state._activeImageToolCard;
+    toolCard.classList.remove('running');
+    toolCard.classList.add('success');
+    const toolSpinner = toolCard.querySelector('.tool-spinner');
+    if (toolSpinner) toolSpinner.outerHTML = '<span class="imagegen-complete">✓</span>';
+    applyImageGenProgressToCard(toolCard, payload, { isFinal: true });
+    toolCard.dataset.resultRendered = 'true';
+    state._activeImageToolCard = null;
+    state.renderedImageGenRequestIds.add(payload.requestId || 'latest');
+    $('#messages-container').scrollTop = $('#messages-container').scrollHeight;
+    return;
+  }
+
+  const card = ensureImageGenCard(payload);
+  card.classList.remove('running');
+  card.classList.add('success');
+  card.dataset.resultRendered = 'true';
+
+  const spinner = card.querySelector('.tool-spinner');
+  if (spinner) spinner.outerHTML = '<span class="imagegen-complete">✓</span>';
+  const title = card.querySelector('.imagegen-title');
+  const status = card.querySelector('.imagegen-card-status');
+  const prompt = card.querySelector('.imagegen-prompt');
+  const fill = card.querySelector('.imagegen-progress-fill');
+  const preview = card.querySelector('.imagegen-preview');
+  const previewFrame = card.querySelector('.imagegen-preview-frame');
+  const meta = card.querySelector('.imagegen-meta');
+
+  if (title && payload.model) title.textContent = `ImageGen · ${payload.model}`;
+  if (status) status.textContent = imageGenStatusText(payload);
+  if (prompt && payload.prompt) prompt.textContent = payload.prompt;
+  if (fill) fill.style.width = '100%';
+  if (preview) preview.innerHTML = renderImageGrid(payload.images || [], payload);
+  if (previewFrame) {
+    previewFrame.classList.add('has-preview', 'final');
+    previewFrame.classList.remove('waiting');
+  }
+  if (meta) meta.textContent = payload.requestId || '';
+  if (payload.requestId) state.renderedImageGenRequestIds.add(payload.requestId);
+  $('#messages-container').scrollTop = $('#messages-container').scrollHeight;
+}
+
+function renderGeneratedImagesFromDone(images = []) {
+  const grouped = new Map();
+  images.forEach(image => {
+    const key = image.requestId || 'latest';
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(image);
+  });
+
+  grouped.forEach((groupImages, requestId) => {
+    if (state.renderedImageGenRequestIds.has(requestId)) return;
+    const existingCard = state.imageGenCards.get(requestId);
+    if (existingCard?.dataset.resultRendered === 'true') return;
+    onImageGenerationResult({
+      requestId,
+      ok: true,
+      images: groupImages,
+      prompt: groupImages[0]?.prompt,
+      model: groupImages[0]?.model,
+    });
+  });
 }
 
 // ── Input ──
@@ -1631,6 +2069,53 @@ function renderSettingsTab(tab) {
       state.ws.updateConfig({ voice: nextVoice }, true);
       showToast('success', nextVoice.enabled ? 'Voice settings saved' : 'Voice input disabled');
     });
+  } else if (tab === 'imagegen') {
+    const imageGen = getImageGenConfig();
+    const enabled = imageGen.enabled === true;
+    const realtimeProgress = imageGen.realtimeProgress !== false;
+    const baseUrl = imageGen.baseUrl || DEFAULT_IMAGEGEN_BASE_URL;
+    const discoveredModels = state.imageGenModels?.baseUrl === baseUrl && Array.isArray(state.imageGenModels.models)
+      ? state.imageGenModels.models
+      : [];
+    body.innerHTML = `<div class="settings-section"><h3>Image Generation</h3>
+      <div class="toggle-container"><span class="toggle-label">Enable image generation tool</span>
+        <div class="toggle${enabled ? ' active' : ''}" id="toggle-imagegen"></div></div>
+      <div class="settings-field"><label>ImageGen API Base URL</label>
+        <input type="text" id="imagegen-base-url" value="${escapeAttr(baseUrl)}" placeholder="${DEFAULT_IMAGEGEN_BASE_URL}"></div>
+      <div class="settings-field"><label>Default Image Model</label>
+        <input type="text" id="imagegen-model" value="${escapeAttr(imageGen.model || '')}" placeholder="sd35_medium">
+        <div class="imagegen-model-list" id="imagegen-model-list">
+          ${discoveredModels.map(model => `<button class="imagegen-model-choice${model === imageGen.model ? ' active' : ''}" type="button" data-model="${escapeAttr(model)}">${escapeHtml(model)}</button>`).join('')}
+        </div>
+      </div>
+      <button class="btn-settings-action secondary" id="btn-discover-imagegen" type="button">Detect Models</button>
+    </div>
+    <div class="settings-section"><h3>Advanced</h3>
+      <div class="toggle-container"><span class="toggle-label">Show live generation steps and previews</span>
+        <div class="toggle${realtimeProgress ? ' active' : ''}" id="toggle-imagegen-realtime"></div></div>
+      <div class="test-result ${enabled ? 'success' : 'warning'}">${enabled ? 'When enabled, the AI can call generate_image from chat.' : 'Image generation is disabled until you turn it on and save.'}</div>
+      <button class="btn-settings-action" id="btn-save-imagegen" style="width:100%;margin-top:14px">Save ImageGen Settings</button>
+    </div>`;
+
+    $('#toggle-imagegen').addEventListener('click', () => $('#toggle-imagegen').classList.toggle('active'));
+    $('#toggle-imagegen-realtime').addEventListener('click', () => $('#toggle-imagegen-realtime').classList.toggle('active'));
+    wireImageGenModelChoiceHandlers(body);
+    $('#btn-discover-imagegen').addEventListener('click', () => {
+      const nextBaseUrl = $('#imagegen-base-url').value.trim() || DEFAULT_IMAGEGEN_BASE_URL;
+      state.ws.listImageGenModels(nextBaseUrl);
+      showToast('info', 'Detecting ImageGen models...');
+    });
+    $('#btn-save-imagegen').addEventListener('click', () => {
+      const nextConfig = {
+        enabled: $('#toggle-imagegen').classList.contains('active'),
+        baseUrl: $('#imagegen-base-url').value.trim() || DEFAULT_IMAGEGEN_BASE_URL,
+        model: $('#imagegen-model').value.trim(),
+        realtimeProgress: $('#toggle-imagegen-realtime').classList.contains('active'),
+      };
+
+      state.ws.setImageGen(nextConfig);
+      showToast('info', nextConfig.enabled ? 'Saving ImageGen settings...' : 'Disabling ImageGen...');
+    });
   } else if (tab === 'modes') {
     const isGuard = state.permMode === 'guard';
     const isYolo = state.permMode === 'yolo';
@@ -1730,7 +2215,7 @@ function renderSettingsTab(tab) {
       <div class="settings-field"><label>LM Studio URL</label>
         <input id="bs-lmstudio-url" value="${escapeAttr(split.local?.lmStudioBaseUrl || state.serverConfig?.lmStudioBaseUrl || 'http://localhost:1234/v1')}"></div>
       <div class="settings-field"><label>Reviewer Provider</label>
-        ${customSelectHtml('bs-reviewer-provider', ['gemini', 'claude', 'openai', 'mistral', 'openrouter', 'ollama_cloud'], split.reviewer?.provider || 'gemini')}</div>
+        ${customSelectHtml('bs-reviewer-provider', ['gemini', 'claude', 'openai', 'mistral', 'deepseek', 'kimi', 'openrouter', 'ollama_cloud'], split.reviewer?.provider || 'gemini')}</div>
       <div class="settings-field"><label>Reviewer Model</label>
         <input id="bs-reviewer-model" value="${escapeAttr(split.reviewer?.model || '')}" placeholder="reviewer model or auto"></div>
       <div class="settings-field"><label>Reviewer API Key</label>
@@ -1817,10 +2302,16 @@ function renderProviderSettingsForm(providerId) {
     const isCurrent = providerId === state.serverConfig?.provider || (providerId === 'openai_oauth' && state.serverConfig?.authType === 'oauth');
     const savedKey = localStorage.getItem(`apikey_${providerId}`) || '';
     const placeholder = isCurrent ? 'Leave blank to keep current server key' : 'Enter API key';
+    const keyLabel = providerId === 'ollama_cloud' ? 'Ollama API Key' :
+                     providerId === 'openrouter' ? 'OpenRouter API Key' :
+                     providerId === 'mistral' ? 'Mistral API Key' :
+                     providerId === 'deepseek' ? 'DeepSeek API Key' :
+                     providerId === 'kimi' ? 'Moonshot API Key' :
+                     'API Key';
     
     html += `
       <div class="settings-field">
-        <label>API Key</label>
+        <label>${keyLabel}</label>
         <div class="password-wrapper">
           <input type="password" id="provider-setting-key" placeholder="${placeholder}" value="${savedKey}">
           <button class="password-toggle" onclick="this.previousElementSibling.type = this.previousElementSibling.type === 'password' ? 'text' : 'password'" type="button">👁️</button>

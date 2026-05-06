@@ -36,6 +36,16 @@ export const PROVIDER_MODELS = {
     { label: 'Mistral Nemo', value: 'open-mistral-nemo' },
     { label: 'Pixtral 12B', value: 'pixtral-12b-2409' },
   ],
+  deepseek: [
+    { label: 'Auto Mode', value: 'auto' },
+    { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+    { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash' },
+  ],
+  kimi: [
+    { label: 'Auto Mode', value: 'auto' },
+    { label: 'Kimi K2.6', value: 'kimi-k2.6' },
+    { label: 'Kimi K2.5', value: 'kimi-k2.5' },
+  ],
   openrouter: [], // free-text model ID input
   openai_oauth: [
     { label: 'Auto Mode', value: 'auto' },
@@ -64,6 +74,8 @@ export const PROVIDERS = [
   { id: 'openai',       name: 'OpenAI',          logo: '../assets/providers/openai.svg', needsKey: true },
   { id: 'openai_oauth', name: 'OpenAI Codex (OAuth)', logo: '../assets/providers/openai.svg', needsKey: false, needsOAuth: true },
   { id: 'mistral',      name: 'Mistral AI',      logo: '../assets/providers/mistral.svg', needsKey: true },
+  { id: 'deepseek',     name: 'DeepSeek',        logo: '../assets/providers/deepseek.svg', needsKey: true },
+  { id: 'kimi',         name: 'Kimi AI',         logo: '../assets/providers/kimi-icon-rounded-corner.png', needsKey: true },
   { id: 'openrouter',   name: 'OpenRouter',      logo: '../assets/providers/openrouter.webp', needsKey: true },
   { id: 'ollama_cloud', name: 'Ollama Cloud',    logo: '../assets/providers/ollama.svg', needsKey: true },
   { id: 'ollama',       name: 'Ollama (Local)',  logo: '../assets/providers/ollama.svg', needsKey: false },

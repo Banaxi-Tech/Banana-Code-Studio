@@ -166,6 +166,8 @@ function renderProviderForm(providerId) {
     const keyLabel = providerId === 'ollama_cloud' ? 'Ollama API Key' :
                      providerId === 'openrouter' ? 'OpenRouter API Key' :
                      providerId === 'mistral' ? 'Mistral API Key' :
+                     providerId === 'deepseek' ? 'DeepSeek API Key' :
+                     providerId === 'kimi' ? 'Moonshot API Key' :
                      'API Key';
     html += `
       <div class="setup-field">

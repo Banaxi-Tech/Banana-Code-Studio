@@ -45,6 +45,18 @@ function isExecutable(filePath) {
 }
 
 function findBananaExecutable() {
+  const explicitExecutable = process.env.BANANA_CLI_PATH;
+  if (explicitExecutable && isExecutable(explicitExecutable)) {
+    return explicitExecutable;
+  }
+
+  if (process.platform !== 'win32') {
+    const siblingCheckoutExecutable = path.resolve(__dirname, '..', 'Banana-Code', 'bin', 'banana.js');
+    if (isExecutable(siblingCheckoutExecutable)) {
+      return siblingCheckoutExecutable;
+    }
+  }
+
   const commandNames = process.platform === 'win32'
     ? ['banana.cmd', 'banana.exe', 'banana.bat', 'banana']
     : ['banana'];
@@ -180,7 +192,6 @@ function createWindow() {
     show: false, // show after ready-to-show to avoid flash
   });
 
-  // Show when ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
