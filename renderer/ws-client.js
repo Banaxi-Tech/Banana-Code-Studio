@@ -161,6 +161,13 @@ export class WSClient {
         this.emit('toolEnd', data.result);
         break;
 
+      case 'session_started':
+        this.emit('sessionStarted', {
+          sessionId: data.sessionId,
+          title: data.title,
+        });
+        break;
+
       case 'done':
         this.emit('done', {
           finalResponse: data.finalResponse,
@@ -192,6 +199,10 @@ export class WSClient {
 
       case 'session_loaded':
         this.emit('sessionLoaded', data);
+        break;
+
+      case 'session_deleted':
+        this.emit('sessionDeleted', data);
         break;
 
       case 'history_cleared':
@@ -294,6 +305,7 @@ export class WSClient {
   setImageGen(config) { return this.send('set_imagegen', { config }); }
   listSessions() { return this.send('list_sessions'); }
   loadSession(sessionId) { return this.send('load_session', { sessionId }); }
+  deleteSession(sessionId) { return this.send('delete_session', { sessionId }); }
   clearHistory() { return this.send('clear_history'); }
   initProject() { return this.send('init'); }
   cleanContext() { return this.send('clean'); }

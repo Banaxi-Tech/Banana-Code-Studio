@@ -486,6 +486,51 @@ body[data-platform="darwin"] .traffic-light {
   color: var(--text-muted);
   white-space: nowrap;
 }
+.session-context-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 142px;
+  padding: 5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+.session-context-menu.hidden {
+  display: none;
+}
+.session-context-action {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.session-context-action svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.session-context-action:hover,
+.session-context-action:focus-visible {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error);
+  outline: none;
+}
 .sidebar-empty {
   padding: 4px 8px 4px 30px;
   color: var(--text-muted);
@@ -1579,6 +1624,10 @@ body[data-platform="darwin"] .traffic-light {
   width: min(92vw, 760px);
   max-width: 760px;
 }
+.modal.model-switch-modal {
+  width: min(92vw, 560px);
+  max-width: 560px;
+}
 .modal-title {
   font-size: 16px; font-weight: 700; margin-bottom: 16px;
   display: flex; align-items: center; gap: 8px;
@@ -1598,6 +1647,11 @@ body[data-platform="darwin"] .traffic-light {
   white-space: pre;
   word-break: normal;
 }
+.modal-detail.model-switch-detail {
+  font-family: var(--font-ui);
+  white-space: normal;
+  word-break: normal;
+}
 .modal-detail-label { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
 .modal-actions {
   display: flex; gap: 8px; margin-top: 18px;
@@ -1615,6 +1669,49 @@ body[data-platform="darwin"] .traffic-light {
 .btn-modal.allow:hover { filter: brightness(1.1); }
 .btn-modal.deny { background: var(--error); color: white; border-color: var(--error); }
 .btn-modal.deny:hover { filter: brightness(1.1); }
+.model-switch-request {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.model-switch-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.model-switch-row span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.model-switch-row strong {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.model-switch-row.recommended {
+  border-color: rgba(52, 211, 153, 0.34);
+  background: rgba(52, 211, 153, 0.08);
+}
+.model-switch-reason,
+.model-switch-note {
+  margin: 0;
+  line-height: 1.5;
+}
+.model-switch-reason {
+  color: var(--text-secondary);
+}
+.model-switch-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
 
 /* ══════════════════════════════════════════
    SETTINGS PANEL

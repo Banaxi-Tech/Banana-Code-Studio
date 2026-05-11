@@ -122,6 +122,7 @@ export function iconHtml(name, className = 'ui-icon') {
     edit: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 14.5 5 11l7.2-7.2a1.7 1.7 0 0 1 2.4 2.4L7.4 13.4 4.5 14.5Z"/><path d="M11.4 4.6 13.4 6.6"/></svg>',
     folder: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h5l1.5 2H17l-1.2 6H4.2L3 6.5Z"/></svg>',
     plus: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>',
+    trash: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5V4h6v1M4.5 6.5h11M6 6.5l.7 9h6.6l.7-9M8.5 9v4M11.5 9v4"/></svg>',
     settings: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/><path d="M15.5 11.2a5.8 5.8 0 0 0 0-2.4l1.4-1.1-1.5-2.5-1.7.7a6 6 0 0 0-2.1-1.2L11.4 3H8.6l-.3 1.7a6 6 0 0 0-2.1 1.2l-1.7-.7L3.1 7.7l1.4 1.1a5.8 5.8 0 0 0 0 2.4l-1.4 1.1 1.4 2.5 1.7-.7a6 6 0 0 0 2.1 1.2l.3 1.7h2.8l.3-1.7a6 6 0 0 0 2.1-1.2l1.7.7 1.5-2.5-1.5-1.1Z"/></svg>',
     shield: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 15 5v4.2c0 3.1-1.7 5.6-5 7.3-3.3-1.7-5-4.2-5-7.3V5l5-1.5Z"/></svg>',
     lock: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 8V6.7a4 4 0 0 1 8 0V8"/><rect x="5" y="8" width="10" height="8" rx="2"/></svg>',

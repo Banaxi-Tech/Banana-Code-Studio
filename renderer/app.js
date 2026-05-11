@@ -55,6 +55,10 @@ const state = {
   imageGenModels: null,
   imageGenCards: new Map(),
   renderedImageGenRequestIds: new Set(),
+  sessionContextMenu: {
+    el: null,
+    sessionId: null,
+  },
   browser: {
     open: false,
     loading: false,
@@ -126,6 +130,7 @@ function connectWebSocket() {
   ws.on('chunk', onChunk);
   ws.on('toolStart', onToolStart);
   ws.on('toolEnd', onToolEnd);
+  ws.on('sessionStarted', onSessionStarted);
   ws.on('done', onDone);
   ws.on('permissionRequested', onPermissionRequested);
   ws.on('sessionsList', onSessionsList);
@@ -146,6 +151,7 @@ function connectWebSocket() {
     }
   });
   ws.on('sessionLoaded', onSessionLoaded);
+  ws.on('sessionDeleted', onSessionDeleted);
   ws.on('workspaceUpdated', (p) => updateWorkspacePill(p));
   ws.on('historyCleared', () => { clearMessages(); showToast('success', 'History cleared'); });
   ws.on('initComplete', () => showToast('success', 'BANANA.md created!'));
@@ -258,6 +264,13 @@ function rememberSessionWorkspace(sessionId, workspacePath) {
   writeSessionWorkspaces(workspaces);
 }
 
+function forgetSessionWorkspace(sessionId) {
+  if (!sessionId) return;
+  const workspaces = readSessionWorkspaces();
+  delete workspaces[sessionId];
+  writeSessionWorkspaces(workspaces);
+}
+
 function rememberSessionBrowserState(sessionId = state.currentSessionId) {
   if (!sessionId) return;
   const browserStates = readSessionBrowserStates();
@@ -267,6 +280,13 @@ function rememberSessionBrowserState(sessionId = state.currentSessionId) {
     title: state.browser.title || safeWebviewCall(getBrowserWebview(), 'getTitle') || '',
     updatedAt: Date.now(),
   };
+  writeSessionBrowserStates(browserStates);
+}
+
+function forgetSessionBrowserState(sessionId) {
+  if (!sessionId) return;
+  const browserStates = readSessionBrowserStates();
+  delete browserStates[sessionId];
   writeSessionBrowserStates(browserStates);
 }
 
@@ -388,6 +408,21 @@ function showToast(type, message) {
 function setupSidebar() {
   $('#btn-new-chat').addEventListener('click', newChat);
   $('#search-sessions').addEventListener('input', (e) => filterSessions(e.target.value));
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('.session-context-menu')) hideSessionContextMenu();
+  });
+  document.addEventListener('scroll', hideSessionContextMenu, true);
+  document.addEventListener('keydown', (event) => {
+    if (!state.sessionContextMenu.sessionId) return;
+    if (event.key === 'Escape') {
+      hideSessionContextMenu();
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault();
+      deleteSessionFromMenu(state.sessionContextMenu.sessionId);
+    }
+  });
 }
 
 async function newChat() {
@@ -454,6 +489,17 @@ function onSessionsList(sessions) {
 
   state.sessions = sessions;
   renderSessions(sessions);
+}
+
+function onSessionStarted(data = {}) {
+  if (!data.sessionId) return;
+  state.currentSessionId = data.sessionId;
+  if (state.pendingWorkspacePath) {
+    rememberSessionWorkspace(data.sessionId, state.pendingWorkspacePath);
+    state.pendingWorkspacePath = null;
+  }
+  rememberSessionBrowserState(data.sessionId);
+  state.ws.listSessions();
 }
 
 function renderSessions(sessions) {
@@ -530,12 +576,91 @@ function renderSessions(sessions) {
   container.innerHTML = html;
   container.querySelectorAll('.session-item').forEach(el => {
     el.addEventListener('click', () => loadSession(el.dataset.id));
+    el.addEventListener('contextmenu', (event) => showSessionContextMenu(event, el.dataset.id));
   });
   container.querySelectorAll('[data-project-key]').forEach(el => {
     el.addEventListener('click', () => {
       toggleProjectCollapsed(el.dataset.projectKey);
     });
   });
+}
+
+function showSessionContextMenu(event, sessionId) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!sessionId) return;
+
+  let menu = state.sessionContextMenu.el;
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.className = 'session-context-menu hidden';
+    menu.innerHTML = `
+      <button class="session-context-action danger" type="button" data-action="delete">
+        ${iconHtml('trash')}
+        <span>Delete</span>
+      </button>`;
+    document.body.appendChild(menu);
+    state.sessionContextMenu.el = menu;
+    menu.querySelector('[data-action="delete"]')?.addEventListener('click', () => {
+      deleteSessionFromMenu(state.sessionContextMenu.sessionId);
+    });
+  }
+
+  state.sessionContextMenu.sessionId = sessionId;
+  menu.classList.remove('hidden');
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(event.clientX, window.innerWidth - rect.width - 8);
+  const top = Math.min(event.clientY, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideSessionContextMenu() {
+  if (!state.sessionContextMenu.el) return;
+  state.sessionContextMenu.el.classList.add('hidden');
+  state.sessionContextMenu.sessionId = null;
+}
+
+function deleteSessionFromMenu(targetSessionId) {
+  if (!targetSessionId) return;
+  const session = state.sessions.find(s => String(sessionId(s)) === String(targetSessionId));
+  const title = session?.title || 'Untitled';
+  const isActive = String(targetSessionId) === String(state.currentSessionId);
+
+  hideSessionContextMenu();
+  if (isActive && state.isStreaming) {
+    showToast('warning', 'Wait for the current response before deleting this chat.');
+    return;
+  }
+
+  const confirmed = window.confirm(`Delete "${title}"? This cannot be undone.`);
+  if (!confirmed) return;
+
+  if (!state.ws.deleteSession(targetSessionId)) {
+    showToast('error', 'Not connected to Banana Code API');
+  }
+}
+
+function onSessionDeleted(data = {}) {
+  const deletedId = data.sessionId;
+  if (!deletedId) return;
+
+  forgetSessionWorkspace(deletedId);
+  forgetSessionBrowserState(deletedId);
+  state.sessions = state.sessions.filter(s => String(sessionId(s)) !== String(deletedId));
+
+  const wasActive = data.active || String(deletedId) === String(state.currentSessionId);
+  if (wasActive) {
+    state.currentSessionId = null;
+    clearMessages();
+    resetImageGenRenderState();
+  }
+
+  filterSessions($('#search-sessions')?.value || '');
+  showToast('success', 'Chat deleted');
 }
 
 function filterSessions(query) {
@@ -585,7 +710,7 @@ function onSessionLoaded(data) {
     
     if (m.role === 'user') {
       // Render user messages (content can be string or array of parts)
-      const text = typeof m.content === 'string' ? m.content : (m.content?.[0]?.text || JSON.stringify(m.content));
+      const text = messageText(m) || JSON.stringify(m.content || m.parts || '');
       addMessageBubble('user', text);
       return;
     }
@@ -616,7 +741,7 @@ function onSessionLoaded(data) {
       
       // If there's also text content, render it as a normal assistant message
       if (m.content) {
-        const text = typeof m.content === 'string' ? m.content : (m.content?.[0]?.text || '');
+        const text = messageText(m);
         if (text.trim()) addMessageBubble('assistant', text);
       }
       return;
@@ -684,6 +809,22 @@ window._copyCode = function(btn) {
 function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 function escapeAttr(t) { return escapeHtml(t).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function decodeEntities(t) { const a = document.createElement('textarea'); a.innerHTML = t; return a.value; }
+function messageText(message = {}) {
+  if (typeof message.content === 'string') return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .map(part => typeof part === 'string' ? part : part?.text || '')
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (Array.isArray(message.parts)) {
+    return message.parts
+      .map(part => part?.text || '')
+      .filter(Boolean)
+      .join('\n');
+  }
+  return '';
+}
 
 function customSelectHtml(id, options, value) {
   const normalized = options.map(opt => (
@@ -1557,6 +1698,36 @@ function waitForBrowserDomReady(timeoutMs = 30000) {
   });
 }
 
+async function waitForBrowserInteractive(timeoutMs = 5000) {
+  const webview = getBrowserWebview();
+  if (!webview) return false;
+  if (state.browser.domReady) return true;
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await waitForBrowserDomReady(250);
+    if (state.browser.domReady) return true;
+
+    const isLoading = Boolean(safeWebviewCall(webview, 'isLoading'));
+    if (!isLoading) {
+      try {
+        const readyState = await webview.executeJavaScript('document.readyState', true);
+        if (readyState === 'interactive' || readyState === 'complete') {
+          state.browser.domReady = true;
+          injectBrowserTheme().catch(() => {});
+          injectBrowserCursor().catch(() => {});
+          syncBrowserState();
+          return true;
+        }
+      } catch {}
+    }
+
+    await delay(100);
+  }
+
+  return Boolean(state.browser.domReady);
+}
+
 async function navigateBrowser(url) {
   const webview = getBrowserWebview();
   state.browser.domReady = false;
@@ -1568,7 +1739,7 @@ async function navigateBrowser(url) {
     waitForBrowserDomReady(),
     waitForBrowserLoad(),
   ]);
-  await waitForBrowserDomReady(5000);
+  await waitForBrowserInteractive(5000);
   state.browser.loading = Boolean(safeWebviewCall(webview, 'isLoading'));
   updateBrowserChrome();
   rememberSessionBrowserState();
@@ -2104,8 +2275,8 @@ async function runBrowserAction(action, params = {}) {
 
 async function browserClick(params = {}) {
   const webview = getBrowserWebview();
-  await waitForBrowserDomReady(5000);
-  if (!state.browser.domReady) throw new Error('Browser page is not ready for clicking yet.');
+  const isInteractive = await waitForBrowserInteractive(5000);
+  if (!isInteractive) throw new Error('Browser page is not ready for clicking yet.');
   let point = null;
   if (params.ref) {
     point = await webview.executeJavaScript(`
@@ -2165,15 +2336,15 @@ async function browserScroll(params = {}) {
   await moveBrowserCursor(x, y);
   webview.focus();
   webview.sendInputEvent({ type: 'mouseWheel', x, y, deltaX, deltaY: -deltaY });
-  await waitForBrowserDomReady(5000);
-  if (!state.browser.domReady) return;
+  const isInteractive = await waitForBrowserInteractive(5000);
+  if (!isInteractive) return;
   await webview.executeJavaScript(`window.scrollBy(${deltaX}, ${deltaY}); true;`);
 }
 
 async function collectBrowserObservation() {
   const webview = getBrowserWebview();
-  await waitForBrowserDomReady(10000);
-  if (!state.browser.domReady) {
+  const isInteractive = await waitForBrowserInteractive(10000);
+  if (!isInteractive) {
     throw new Error('Browser page is not ready yet. Try browser_snapshot again after the page finishes loading.');
   }
   await injectBrowserCursor();
@@ -2922,15 +3093,117 @@ function showNextPermission() {
   const detailsEl = $('#permission-details');
   const modalOverlay = $('#permission-modal');
   const modal = modalOverlay?.querySelector('.modal');
+  const titleEl = modalOverlay?.querySelector('.modal-title');
+  const labels = modalOverlay?.querySelectorAll('.modal-detail-label') || [];
+  const allowBtn = $('#btn-perm-allow');
+  const alwaysBtn = $('#btn-perm-always');
+  const denyBtn = $('#btn-perm-deny');
   const action = state.currentPermission.action || '';
   const details = state.currentPermission.details || '';
-  const isLargeDiff = details.length > 1800 || /(^|\n)@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@/.test(details) || /(^|\n)[+-]{3}\s/.test(details);
+
+  resetPermissionModal({ titleEl, labels, allowBtn, alwaysBtn, denyBtn, detailsEl, modal });
+
+  if (isModelSwitchPermission(state.currentPermission)) {
+    renderModelSwitchPermission(state.currentPermission, {
+      titleEl,
+      labels,
+      actionEl,
+      detailsEl,
+      modal,
+      allowBtn,
+      alwaysBtn,
+      denyBtn,
+      modalOverlay,
+    });
+    return;
+  }
+
+  const detailText = formatPermissionDetails(details);
+  const isLargeDiff = detailText.length > 1800 || /(^|\n)@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@/.test(detailText) || /(^|\n)[+-]{3}\s/.test(detailText);
 
   actionEl.textContent = action;
-  detailsEl.textContent = details;
+  detailsEl.textContent = detailText;
   detailsEl.scrollTop = 0;
   detailsEl.scrollLeft = 0;
   modal?.classList.toggle('diff-modal', isLargeDiff);
+  modalOverlay.classList.remove('hidden');
+}
+
+function resetPermissionModal({ titleEl, labels, allowBtn, alwaysBtn, denyBtn, detailsEl, modal }) {
+  if (titleEl) titleEl.textContent = 'Permission Request';
+  if (labels[0]) labels[0].textContent = 'Action';
+  if (labels[1]) labels[1].textContent = 'Details';
+  if (allowBtn) allowBtn.textContent = '✓ Allow';
+  if (alwaysBtn) {
+    alwaysBtn.hidden = false;
+    alwaysBtn.textContent = '✓ Always';
+  }
+  if (denyBtn) denyBtn.textContent = '✗ Deny';
+  if (detailsEl) detailsEl.classList.remove('model-switch-detail');
+  modal?.classList.remove('diff-modal', 'model-switch-modal');
+}
+
+function formatPermissionDetails(details) {
+  if (typeof details === 'string') return details;
+  if (details == null) return '';
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return String(details);
+  }
+}
+
+function isModelSwitchPermission(permission = {}) {
+  return permission.action === 'model_switch';
+}
+
+function renderModelSwitchPermission(permission, elements) {
+  const details = permission.details && typeof permission.details === 'object'
+    ? permission.details
+    : {};
+  const {
+    titleEl,
+    labels,
+    actionEl,
+    detailsEl,
+    modal,
+    allowBtn,
+    alwaysBtn,
+    denyBtn,
+    modalOverlay,
+  } = elements;
+  const currentModel = details.currentModel || state.currentModel || 'current model';
+  const recommendedModel = details.recommendedModel || 'recommended model';
+  const reason = String(details.reason || '').trim();
+
+  if (titleEl) titleEl.textContent = details.title || 'Switch Model?';
+  if (labels[0]) labels[0].textContent = 'Recommendation';
+  if (labels[1]) labels[1].textContent = 'Reason';
+  if (actionEl) {
+    actionEl.textContent = details.message || `The model recommends switching from ${currentModel} to ${recommendedModel}.`;
+  }
+  if (detailsEl) {
+    detailsEl.classList.add('model-switch-detail');
+    detailsEl.innerHTML = `
+      <div class="model-switch-request">
+        <div class="model-switch-row">
+          <span>Current</span>
+          <strong>${escapeHtml(currentModel)}</strong>
+        </div>
+        <div class="model-switch-row recommended">
+          <span>Switch to</span>
+          <strong>${escapeHtml(recommendedModel)}</strong>
+        </div>
+        ${reason ? `<p class="model-switch-reason">${escapeHtml(reason)}</p>` : ''}
+        <p class="model-switch-note">Applies only to this response. Future messages return to your configured model.</p>
+      </div>`;
+    detailsEl.scrollTop = 0;
+    detailsEl.scrollLeft = 0;
+  }
+  if (allowBtn) allowBtn.textContent = details.approveLabel || `Switch to ${recommendedModel}`;
+  if (alwaysBtn) alwaysBtn.hidden = true;
+  if (denyBtn) denyBtn.textContent = details.denyLabel || `Continue with ${currentModel}`;
+  modal?.classList.add('model-switch-modal');
   modalOverlay.classList.remove('hidden');
 }
 
