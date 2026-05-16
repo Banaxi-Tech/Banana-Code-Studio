@@ -3,7 +3,18 @@
 // ═══════════════════════════════════════════════════════════
 
 import { WSClient } from './ws-client.js';
-import { PROVIDERS, PROVIDER_MODELS, PERMISSION_MODES, OPERATING_MODES, REASONING_LEVELS, providerLogoHtml, iconHtml } from './constants.js';
+import {
+  DEFAULT_LLAMACPP_BASE_URL,
+  DEFAULT_QWEN_BASE_URL,
+  PROVIDERS,
+  PROVIDER_MODELS,
+  PERMISSION_MODES,
+  OPERATING_MODES,
+  QWEN_ENDPOINTS,
+  REASONING_LEVELS,
+  providerLogoHtml,
+  iconHtml,
+} from './constants.js';
 import { marked } from '../node_modules/marked/lib/marked.esm.js';
 import DOMPurify from '../node_modules/dompurify/dist/purify.es.mjs';
 
@@ -15,10 +26,65 @@ const SESSION_BROWSER_STATES_KEY = 'sessionBrowserStates';
 const COLLAPSED_PROJECTS_KEY = 'collapsedProjects';
 const MAX_RECENT_WORKSPACES = 8;
 const DEFAULT_IMAGEGEN_BASE_URL = 'http://127.0.0.1:8000';
-const VOICE_MODELS = [
+const GROQ_VOICE_MODELS = [
   { value: 'whisper-large-v3-turbo', label: 'Whisper Large V3 Turbo' },
   { value: 'whisper-large-v3', label: 'Whisper Large V3' },
 ];
+const OPENROUTER_VOICE_MODELS = [
+  { value: 'openai/gpt-4o-mini-transcribe', label: 'GPT-4o Mini Transcribe' },
+  { value: 'openai/gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
+];
+const VOICE_TRANSCRIPTION_PROVIDERS = [
+  { value: 'groq', label: 'Groq Whisper' },
+  { value: 'openrouter', label: 'OpenRouter GPT-4o Transcribe' },
+];
+const VOICE_MODELS_BY_PROVIDER = {
+  groq: GROQ_VOICE_MODELS,
+  openrouter: OPENROUTER_VOICE_MODELS,
+};
+const LOCAL_MODEL_PROVIDERS = new Set(['ollama', 'lmstudio', 'llamacpp']);
+const TRUE_BY_DEFAULT_SETTINGS = new Set(['usePatchFile', 'useMemory', 'useBananaGuard']);
+
+function normalizeLlamaCppBaseUrl(baseUrl = DEFAULT_LLAMACPP_BASE_URL) {
+  const trimmed = String(baseUrl || DEFAULT_LLAMACPP_BASE_URL).trim().replace(/\/+$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
+function normalizeQwenBaseUrl(baseUrl = DEFAULT_QWEN_BASE_URL) {
+  return String(baseUrl || DEFAULT_QWEN_BASE_URL).trim().replace(/\/+$/, '');
+}
+
+function qwenEndpointOptions(currentValue = DEFAULT_QWEN_BASE_URL) {
+  const normalizedCurrent = normalizeQwenBaseUrl(currentValue);
+  const options = [...QWEN_ENDPOINTS];
+  if (normalizedCurrent && !options.some(option => option.value === normalizedCurrent)) {
+    options.splice(options.length - 1, 0, { label: `Current custom (${normalizedCurrent})`, value: normalizedCurrent });
+  }
+  return options;
+}
+
+function getVoiceProvider(voice = {}) {
+  if (voice.provider) return voice.provider;
+  if (String(voice.model || '').startsWith('openai/')) return 'openrouter';
+  return 'groq';
+}
+
+function getVoiceModels(provider) {
+  return VOICE_MODELS_BY_PROVIDER[provider] || GROQ_VOICE_MODELS;
+}
+
+function isVoiceConfigured(voice = {}) {
+  const provider = getVoiceProvider(voice);
+  if (provider === 'openrouter') {
+    return Boolean(voice.openrouterApiKey && voice.model);
+  }
+  return Boolean(voice.groqApiKey && voice.model);
+}
+
+function serverSettingEnabled(key) {
+  if (TRUE_BY_DEFAULT_SETTINGS.has(key)) return state.serverConfig?.[key] !== false;
+  return state.serverConfig?.[key] === true;
+}
 
 window.marked = marked;
 window.DOMPurify = DOMPurify;
@@ -197,7 +263,7 @@ function onConfigUpdated(config) {
   updateModeTrigger();
   updateOperatingModeTrigger();
   updateVoiceButtonState();
-  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'voice', 'imagegen', 'browser', 'bananasplit'].includes(currentSettingsTab)) {
+  if ($('#settings-panel')?.classList.contains('open') && ['settings', 'modes', 'provider', 'voice', 'imagegen', 'browser', 'bananasplit'].includes(currentSettingsTab)) {
     renderSettingsTab(currentSettingsTab);
   }
 }
@@ -1001,6 +1067,9 @@ function onToolEnd(result) {
   if (body && result) {
     const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
     body.textContent = text.substring(0, 2000);
+    if (text.includes('Banana Code settings were updated')) {
+      fetchServerConfig();
+    }
   }
 }
 
@@ -2532,7 +2601,7 @@ async function handleVoiceButtonClick() {
     return;
   }
 
-  if (!voice.groqApiKey || !voice.model) {
+  if (!isVoiceConfigured(voice)) {
     openSettings();
     setActiveSettingsTab('voice');
     showToast('info', 'Set up voice input first.');
@@ -2613,7 +2682,12 @@ async function stopVoiceRecordingAndSend() {
     if (!state.currentSessionId) state.pendingWorkspacePath = state.workspacePath;
     showToast('info', 'Transcribing voice...');
     state.isStreaming = true;
-    const result = await state.ws.sendVoice(wavBlob, { fileName: 'voice.wav' });
+    const voice = state.serverConfig?.voice || {};
+    const result = await state.ws.sendVoice(wavBlob, {
+      fileName: 'voice.wav',
+      voiceProvider: getVoiceProvider(voice),
+      model: voice.model,
+    });
     if (result.transcript) addMessageBubble('user', result.transcript);
     onDone(result);
   } catch (err) {
@@ -2685,7 +2759,7 @@ function updateVoiceButtonState() {
   const textarea = $('#message-input');
   const blockedByContent = Boolean(textarea.value.trim() || state.attachments.length > 0 || state.browserElementAttachments.length > 0);
   const voice = state.serverConfig?.voice || {};
-  const isSetup = Boolean(voice.groqApiKey && voice.model);
+  const isSetup = isVoiceConfigured(voice);
   const isEnabled = voice.enabled !== false;
   const canStart = !state.isStreaming
     && !state.isVoiceTranscribing
@@ -2891,7 +2965,7 @@ function renderModelList(providerId) {
   if (providerId === 'openrouter') {
     html = `<div style="padding:12px"><input type="text" id="or-model-input" placeholder="Enter model ID..." style="width:100%;padding:8px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:var(--font-mono);font-size:12px;outline:none" value="${providerId === state.currentProvider ? state.currentModel : ''}">
     <button onclick="document.dispatchEvent(new CustomEvent('or-model-set'))" style="margin-top:8px;padding:6px 14px;background:var(--accent);border:none;border-radius:6px;color:var(--text-inverse);cursor:pointer;font-size:12px">Set Model</button></div>`;
-  } else if (providerId === 'ollama' || providerId === 'lmstudio') {
+  } else if (LOCAL_MODEL_PROVIDERS.has(providerId)) {
     // Render a loading state, then fetch
     html = `<div id="dynamic-model-list-${providerId}" style="padding:12px;color:var(--text-muted);font-size:12px">⏳ Detecting local models...</div>`;
     
@@ -2904,10 +2978,15 @@ function renderModelList(providerId) {
           const data = await res.json();
           fetchedModels = data.models.map(m => ({ label: m.name, value: m.name }));
         } else if (providerId === 'lmstudio') {
-          const baseUrl = state.config?.lmStudioBaseUrl || 'http://localhost:1234/v1';
+          const baseUrl = state.serverConfig?.lmStudioBaseUrl || 'http://localhost:1234/v1';
           const res = await fetch(`${baseUrl}/models`);
           const data = await res.json();
           fetchedModels = data.data.map(m => ({ label: m.id, value: m.id }));
+        } else if (providerId === 'llamacpp') {
+          const baseUrl = normalizeLlamaCppBaseUrl(state.serverConfig?.llamaCppBaseUrl || DEFAULT_LLAMACPP_BASE_URL);
+          const res = await fetch(`${baseUrl}/models`);
+          const data = await res.json();
+          fetchedModels = Array.isArray(data.data) ? data.data.map(m => ({ label: m.id, value: m.id })).filter(m => m.value) : [];
         }
       } catch (e) {
         // Failed to fetch
@@ -2917,7 +2996,8 @@ function renderModelList(providerId) {
       if (!container) return; // panel closed or switched
       
       if (fetchedModels.length === 0) {
-        container.innerHTML = `<span style="color:#ff6b6b">✗ Could not detect models. Is ${providerId === 'ollama' ? 'Ollama' : 'LM Studio'} running?</span>`;
+        const label = providerId === 'ollama' ? 'Ollama' : (providerId === 'lmstudio' ? 'LM Studio' : 'llama.cpp');
+        container.innerHTML = `<span style="color:#ff6b6b">✗ Could not detect models. Is ${label} running?</span>`;
       } else {
         container.style.padding = '0';
         container.innerHTML = fetchedModels.map(m => {
@@ -3051,6 +3131,14 @@ function selectModel(provider, model) {
     configUpdate.authType = 'api_key';
   } else {
     configUpdate.authType = null; // Clear oauth flag for other providers
+  }
+
+  if (provider === 'qwen') {
+    configUpdate.qwenBaseUrl = normalizeQwenBaseUrl(state.serverConfig?.qwenBaseUrl || DEFAULT_QWEN_BASE_URL);
+  } else if (provider === 'lmstudio') {
+    configUpdate.lmStudioBaseUrl = state.serverConfig?.lmStudioBaseUrl || 'http://localhost:1234/v1';
+  } else if (provider === 'llamacpp') {
+    configUpdate.llamaCppBaseUrl = normalizeLlamaCppBaseUrl(state.serverConfig?.llamaCppBaseUrl || DEFAULT_LLAMACPP_BASE_URL);
   }
   
   state.ws.updateConfig(configUpdate, true);
@@ -3353,34 +3441,66 @@ function renderSettingsTab(tab) {
     });
   } else if (tab === 'voice') {
     const voice = state.serverConfig?.voice || {};
-    const configured = Boolean(voice.groqApiKey && voice.model);
+    const voiceProvider = getVoiceProvider(voice);
+    const configured = isVoiceConfigured(voice);
     const enabled = voice.enabled !== false;
+    const groqModel = GROQ_VOICE_MODELS.some(m => m.value === voice.model) ? voice.model : 'whisper-large-v3-turbo';
+    const openrouterModel = OPENROUTER_VOICE_MODELS.some(m => m.value === voice.model) ? voice.model : 'openai/gpt-4o-mini-transcribe';
     body.innerHTML = `<div class="settings-section"><h3>Voice Input</h3>
       <div class="toggle-container"><span class="toggle-label">Enable microphone transcription</span>
         <div class="toggle${enabled ? ' active' : ''}" id="toggle-voice"></div></div>
-      <div class="settings-field"><label>Groq API Key</label>
-        <input type="password" id="voice-groq-key" placeholder="gsk_..." value="${escapeAttr(voice.groqApiKey || '')}"></div>
-      <div class="settings-field"><label>Whisper Model</label>
-        ${customSelectHtml('voice-model', VOICE_MODELS, voice.model || 'whisper-large-v3-turbo')}</div>
-      <div class="test-result ${configured ? 'success' : 'warning'}">${configured ? 'Voice is configured on the Banana Code server.' : 'Add a Groq API key and save to finish setup.'}</div>
+      <div class="settings-field"><label>Transcription Provider</label>
+        ${customSelectHtml('voice-provider', VOICE_TRANSCRIPTION_PROVIDERS, voiceProvider)}</div>
+      <div data-voice-provider-section="groq">
+        <div class="settings-field"><label>Groq API Key</label>
+          <input type="password" id="voice-groq-key" placeholder="gsk_..." value="${escapeAttr(voice.groqApiKey || '')}"></div>
+        <div class="settings-field"><label>Whisper Model</label>
+          ${customSelectHtml('voice-model-groq', GROQ_VOICE_MODELS, groqModel)}</div>
+      </div>
+      <div data-voice-provider-section="openrouter">
+        <div class="settings-field"><label>OpenRouter API Key</label>
+          <input type="password" id="voice-openrouter-key" placeholder="sk-or-..." value="${escapeAttr(voice.openrouterApiKey || '')}"></div>
+        <div class="settings-field"><label>Transcription Model</label>
+          ${customSelectHtml('voice-model-openrouter', OPENROUTER_VOICE_MODELS, openrouterModel)}</div>
+      </div>
+      <div class="test-result ${configured ? 'success' : 'warning'}">${configured ? 'Voice is configured on the Banana Code server.' : 'Add the selected provider API key and save to finish setup.'}</div>
       <button class="btn-settings-action" id="btn-save-voice" style="width:100%;margin-top:14px">Save Voice Settings</button>
     </div>`;
     initCustomSelects(body);
+    const syncVoiceProviderFields = () => {
+      const selectedProvider = $('#voice-provider').value;
+      body.querySelectorAll('[data-voice-provider-section]').forEach(section => {
+        section.style.display = section.dataset.voiceProviderSection === selectedProvider ? 'block' : 'none';
+      });
+    };
+    $('#voice-provider').addEventListener('change', syncVoiceProviderFields);
+    syncVoiceProviderFields();
     $('#toggle-voice').addEventListener('click', () => {
       $('#toggle-voice').classList.toggle('active');
     });
     $('#btn-save-voice').addEventListener('click', () => {
+      const provider = $('#voice-provider').value;
       const groqApiKey = $('#voice-groq-key').value.trim();
-      const model = $('#voice-model').value || 'whisper-large-v3-turbo';
+      const openrouterApiKey = $('#voice-openrouter-key').value.trim();
+      const model = provider === 'openrouter'
+        ? ($('#voice-model-openrouter').value || 'openai/gpt-4o-mini-transcribe')
+        : ($('#voice-model-groq').value || 'whisper-large-v3-turbo');
       const nextVoice = {
         ...voice,
         enabled: $('#toggle-voice').classList.contains('active'),
+        provider,
         groqApiKey,
+        openrouterApiKey,
         model,
       };
 
-      if (nextVoice.enabled && !groqApiKey) {
+      if (nextVoice.enabled && provider === 'groq' && !groqApiKey) {
         showToast('error', 'Groq API key is required to enable voice input.');
+        return;
+      }
+
+      if (nextVoice.enabled && provider === 'openrouter' && !openrouterApiKey) {
+        showToast('error', 'OpenRouter API key is required to enable voice input.');
         return;
       }
 
@@ -3490,6 +3610,7 @@ function renderSettingsTab(tab) {
     const settings = [
       ['autoFeedWorkspace', 'Auto-feed workspace files'],
       ['useMarkedTerminal', 'CLI markdown highlighting'],
+      ['usePuppeteerFetch', 'Puppeteer fetch_url rendering'],
       ['usePatchFile', 'Patch file tool'],
       ['showTokenCount', 'Show token count'],
       ['useMemory', 'Memory tools'],
@@ -3499,13 +3620,13 @@ function renderSettingsTab(tab) {
     ];
     body.innerHTML = `<div class="settings-section"><h3>Feature Settings</h3>
       ${settings.map(([key, label]) => `<div class="toggle-container"><span class="toggle-label">${label}</span>
-        <div class="toggle${state.serverConfig?.[key] ? ' active' : ''}" data-setting="${key}"></div></div>`).join('')}
+        <div class="toggle${serverSettingEnabled(key) ? ' active' : ''}" data-setting="${key}"></div></div>`).join('')}
       <div class="test-result warning">UltraMemory can significantly increase API usage and cost.</div>
     </div>`;
     body.querySelectorAll('[data-setting]').forEach(toggle => {
       toggle.addEventListener('click', () => {
         const key = toggle.dataset.setting;
-        const next = !state.serverConfig?.[key];
+        const next = !serverSettingEnabled(key);
         if (key === 'useUltraMemory' && next) {
           const ok = window.confirm('UltraMemory scans chats in the background using AI and can significantly increase API usage and cost. Enable it?');
           if (!ok) return;
@@ -3556,17 +3677,21 @@ function renderSettingsTab(tab) {
       <div class="toggle-container"><span class="toggle-label">Enable BananaSplit</span>
         <div class="toggle${split.enabled ? ' active' : ''}" id="toggle-bananasplit"></div></div>
       <div class="settings-field"><label>Local Coding Provider</label>
-        ${customSelectHtml('bs-local-provider', [{ value: 'ollama', label: 'Ollama' }, { value: 'lmstudio', label: 'LM Studio' }], split.local?.provider || 'ollama')}</div>
+        ${customSelectHtml('bs-local-provider', [{ value: 'ollama', label: 'Ollama' }, { value: 'lmstudio', label: 'LM Studio' }, { value: 'llamacpp', label: 'llama.cpp' }], split.local?.provider || 'ollama')}</div>
       <div class="settings-field"><label>Local Model</label>
         <input id="bs-local-model" value="${escapeAttr(split.local?.model || '')}" placeholder="local model name"></div>
       <div class="settings-field"><label>LM Studio URL</label>
         <input id="bs-lmstudio-url" value="${escapeAttr(split.local?.lmStudioBaseUrl || state.serverConfig?.lmStudioBaseUrl || 'http://localhost:1234/v1')}"></div>
+      <div class="settings-field"><label>llama.cpp URL</label>
+        <input id="bs-llamacpp-url" value="${escapeAttr(split.local?.llamaCppBaseUrl || state.serverConfig?.llamaCppBaseUrl || DEFAULT_LLAMACPP_BASE_URL)}"></div>
       <div class="settings-field"><label>Reviewer Provider</label>
-        ${customSelectHtml('bs-reviewer-provider', ['gemini', 'claude', 'openai', 'mistral', 'deepseek', 'kimi', 'openrouter', 'ollama_cloud'], split.reviewer?.provider || 'gemini')}</div>
+        ${customSelectHtml('bs-reviewer-provider', ['gemini', 'claude', 'openai', 'mistral', 'deepseek', 'kimi', 'qwen', 'openrouter', 'ollama_cloud'], split.reviewer?.provider || 'gemini')}</div>
       <div class="settings-field"><label>Reviewer Model</label>
         <input id="bs-reviewer-model" value="${escapeAttr(split.reviewer?.model || '')}" placeholder="reviewer model or auto"></div>
       <div class="settings-field"><label>Reviewer API Key</label>
         <input type="password" id="bs-reviewer-key" value="${escapeAttr(split.reviewer?.apiKey || '')}" placeholder="leave blank to use existing provider key"></div>
+      <div class="settings-field"><label>Reviewer Qwen Base URL</label>
+        <input id="bs-reviewer-qwen-url" value="${escapeAttr(split.reviewer?.qwenBaseUrl || state.serverConfig?.qwenBaseUrl || DEFAULT_QWEN_BASE_URL)}"></div>
       <div class="settings-field"><label>OpenAI Auth Type</label>
         ${customSelectHtml('bs-openai-auth', [{ value: 'api_key', label: 'API key' }, { value: 'oauth', label: 'OAuth' }], split.reviewer?.authType === 'oauth' ? 'oauth' : 'api_key')}</div>
       <div class="settings-field"><label>OpenAI OAuth Effort</label>
@@ -3595,11 +3720,13 @@ function renderSettingsTab(tab) {
           provider: $('#bs-local-provider').value,
           model: $('#bs-local-model').value.trim(),
           lmStudioBaseUrl: $('#bs-lmstudio-url').value.trim(),
+          llamaCppBaseUrl: normalizeLlamaCppBaseUrl($('#bs-llamacpp-url').value),
         },
         reviewer: {
           provider: reviewerProvider,
           model: $('#bs-reviewer-model').value.trim() || 'auto',
           apiKey: $('#bs-reviewer-key').value.trim() || undefined,
+          qwenBaseUrl: normalizeQwenBaseUrl($('#bs-reviewer-qwen-url').value),
           authType: $('#bs-openai-auth').value,
           openaiCodexEffort: $('#bs-openai-effort').value,
           claudeEffort: $('#bs-claude-effort').value,
@@ -3654,6 +3781,7 @@ function renderProviderSettingsForm(providerId) {
                      providerId === 'mistral' ? 'Mistral API Key' :
                      providerId === 'deepseek' ? 'DeepSeek API Key' :
                      providerId === 'kimi' ? 'Moonshot API Key' :
+                     providerId === 'qwen' ? 'DashScope / Qwen API Key' :
                      'API Key';
     
     html += `
@@ -3663,6 +3791,32 @@ function renderProviderSettingsForm(providerId) {
           <input type="password" id="provider-setting-key" placeholder="${placeholder}" value="${savedKey}">
           <button class="password-toggle" onclick="this.previousElementSibling.type = this.previousElementSibling.type === 'password' ? 'text' : 'password'" type="button">👁️</button>
         </div>
+      </div>`;
+  }
+
+  if (providerId === 'qwen') {
+    const currentQwenBaseUrl = state.serverConfig?.qwenBaseUrl || DEFAULT_QWEN_BASE_URL;
+    html += `
+      <div class="settings-field">
+        <label>Qwen API Region</label>
+        ${customSelectHtml('provider-setting-qwen-base-url', qwenEndpointOptions(currentQwenBaseUrl), currentQwenBaseUrl)}
+        <input type="text" id="provider-setting-qwen-custom-url" value="${escapeAttr(currentQwenBaseUrl)}" placeholder="${DEFAULT_QWEN_BASE_URL}" style="display:none;margin-top:8px">
+      </div>`;
+  }
+
+  if (providerId === 'lmstudio') {
+    html += `
+      <div class="settings-field">
+        <label>LM Studio Base URL</label>
+        <input type="text" id="provider-setting-lmstudio-url" value="${escapeAttr(state.serverConfig?.lmStudioBaseUrl || 'http://localhost:1234/v1')}" placeholder="http://localhost:1234/v1">
+      </div>`;
+  }
+
+  if (providerId === 'llamacpp') {
+    html += `
+      <div class="settings-field">
+        <label>llama.cpp Base URL</label>
+        <input type="text" id="provider-setting-llamacpp-url" value="${escapeAttr(state.serverConfig?.llamaCppBaseUrl || DEFAULT_LLAMACPP_BASE_URL)}" placeholder="${DEFAULT_LLAMACPP_BASE_URL}">
       </div>`;
   }
   
@@ -3717,6 +3871,14 @@ function renderProviderSettingsForm(providerId) {
   html += `<button class="btn-settings-action" id="btn-save-provider" style="width:100%; margin-top:8px;">Switch & Save Config</button>`;
   container.innerHTML = html;
   initCustomSelects(container);
+  const syncQwenCustomUrl = () => {
+    const select = $('#provider-setting-qwen-base-url');
+    const customInput = $('#provider-setting-qwen-custom-url');
+    if (!select || !customInput) return;
+    customInput.style.display = select.value === 'CUSTOM_URL' ? 'block' : 'none';
+  };
+  $('#provider-setting-qwen-base-url')?.addEventListener('change', syncQwenCustomUrl);
+  syncQwenCustomUrl();
   let extendedCache = !!state.serverConfig?.useExtendedCache;
   $('#provider-setting-extended-cache')?.addEventListener('click', () => {
     extendedCache = !extendedCache;
@@ -3746,6 +3908,23 @@ function renderProviderSettingsForm(providerId) {
     if (providerId === 'claude') {
       update.claudeEffort = $('#provider-setting-claude-effort')?.value || 'medium';
       update.useExtendedCache = extendedCache;
+    }
+
+    if (providerId === 'qwen') {
+      const selectedQwenBaseUrl = $('#provider-setting-qwen-base-url')?.value;
+      update.qwenBaseUrl = normalizeQwenBaseUrl(
+        selectedQwenBaseUrl === 'CUSTOM_URL'
+          ? $('#provider-setting-qwen-custom-url')?.value
+          : selectedQwenBaseUrl
+      );
+    }
+
+    if (providerId === 'lmstudio') {
+      update.lmStudioBaseUrl = $('#provider-setting-lmstudio-url')?.value.trim() || 'http://localhost:1234/v1';
+    }
+
+    if (providerId === 'llamacpp') {
+      update.llamaCppBaseUrl = normalizeLlamaCppBaseUrl($('#provider-setting-llamacpp-url')?.value);
     }
     
     // Model

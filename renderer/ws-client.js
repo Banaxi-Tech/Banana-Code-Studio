@@ -40,13 +40,15 @@ export class WSClient {
     return this.url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
   }
 
-  async sendVoice(audioBlob, { text = '', fileName = 'voice.wav' } = {}) {
+  async sendVoice(audioBlob, { text = '', fileName = 'voice.wav', voiceProvider = '', model = '' } = {}) {
     const httpUrl = this.getHttpBaseUrl();
     if (!httpUrl) throw new Error('Not connected to Banana Code API');
 
     const form = new FormData();
     form.append('file', audioBlob, fileName);
     if (text.trim()) form.append('text', text.trim());
+    if (voiceProvider) form.append('voiceProvider', voiceProvider);
+    if (model) form.append('model', model);
 
     const url = new URL('/api/voice', httpUrl);
     if (this.token) url.searchParams.set('token', this.token);

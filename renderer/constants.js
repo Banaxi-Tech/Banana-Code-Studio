@@ -2,6 +2,16 @@
 // Banana Code Studio — Constants (mirrors CLI constants.js)
 // ═══════════════════════════════════════════════════════════
 
+export const DEFAULT_QWEN_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+export const DEFAULT_LLAMACPP_BASE_URL = 'http://127.0.0.1:8080/v1';
+
+export const QWEN_ENDPOINTS = [
+  { label: 'International / Singapore', value: DEFAULT_QWEN_BASE_URL },
+  { label: 'US / Virginia', value: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1' },
+  { label: 'China / Beijing', value: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  { label: 'Custom OpenAI-compatible URL', value: 'CUSTOM_URL' },
+];
+
 export const PROVIDER_MODELS = {
   gemini: [
     { label: 'Auto Mode', value: 'auto' },
@@ -46,6 +56,25 @@ export const PROVIDER_MODELS = {
     { label: 'Kimi K2.6', value: 'kimi-k2.6' },
     { label: 'Kimi K2.5', value: 'kimi-k2.5' },
   ],
+  qwen: [
+    { label: 'Auto Mode', value: 'auto' },
+    { label: 'Qwen 3.6 Max Preview', value: 'qwen3.6-max-preview' },
+    { label: 'Qwen 3.6 Plus', value: 'qwen3.6-plus' },
+    { label: 'Qwen 3.6 Plus Snapshot 2026-04-02', value: 'qwen3.6-plus-2026-04-02' },
+    { label: 'Qwen 3.6 Flash', value: 'qwen3.6-flash' },
+    { label: 'Qwen 3.6 Flash Snapshot 2026-04-16', value: 'qwen3.6-flash-2026-04-16' },
+    { label: 'Qwen 3.6 35B A3B', value: 'qwen3.6-35b-a3b' },
+    { label: 'Qwen 3.6 27B', value: 'qwen3.6-27b' },
+    { label: 'Qwen 3.5 Plus', value: 'qwen3.5-plus' },
+    { label: 'Qwen 3.5 Plus Snapshot 2026-04-20', value: 'qwen3.5-plus-2026-04-20' },
+    { label: 'Qwen 3.5 Flash', value: 'qwen3.5-flash' },
+    { label: 'Qwen 3.5 397B A17B', value: 'qwen3.5-397b-a17b' },
+    { label: 'Qwen 3.5 122B A10B', value: 'qwen3.5-122b-a10b' },
+    { label: 'Qwen 3 Max', value: 'qwen3-max' },
+    { label: 'Qwen 3 Coder Next', value: 'qwen3-coder-next' },
+    { label: 'Qwen 3 Next 80B Thinking', value: 'qwen3-next-80b-a3b-thinking' },
+    { label: 'Qwen 3 Next 80B Instruct', value: 'qwen3-next-80b-a3b-instruct' },
+  ],
   openrouter: [], // free-text model ID input
   openai_oauth: [
     { label: 'Auto Mode', value: 'auto' },
@@ -66,6 +95,7 @@ export const PROVIDER_MODELS = {
   ],
   ollama: [],    // auto-detect from localhost:11434
   lmstudio: [],  // auto-detect from configured base URL
+  llamacpp: [],  // auto-detect from configured llama.cpp server base URL
 };
 
 export const PROVIDERS = [
@@ -76,10 +106,12 @@ export const PROVIDERS = [
   { id: 'mistral',      name: 'Mistral AI',      logo: '../assets/providers/mistral.svg', needsKey: true },
   { id: 'deepseek',     name: 'DeepSeek',        logo: '../assets/providers/deepseek.svg', needsKey: true },
   { id: 'kimi',         name: 'Kimi AI',         logo: '../assets/providers/kimi-icon-rounded-corner.png', needsKey: true },
+  { id: 'qwen',         name: 'Qwen',            needsKey: true },
   { id: 'openrouter',   name: 'OpenRouter',      logo: '../assets/providers/openrouter.webp', needsKey: true },
   { id: 'ollama_cloud', name: 'Ollama Cloud',    logo: '../assets/providers/ollama.svg', needsKey: true },
   { id: 'ollama',       name: 'Ollama (Local)',  logo: '../assets/providers/ollama.svg', needsKey: false },
   { id: 'lmstudio',     name: 'LM Studio',       logo: '../assets/providers/lmstudio.png', needsKey: false },
+  { id: 'llamacpp',     name: 'llama.cpp',       needsKey: false },
 ];
 
 export const REASONING_LEVELS = {

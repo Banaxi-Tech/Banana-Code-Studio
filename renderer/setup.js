@@ -2,7 +2,14 @@
 // Banana Code Studio — Setup Wizard Logic
 // ═══════════════════════════════════════════════════════════
 
-import { PROVIDERS, PROVIDER_MODELS, providerLogoHtml } from './constants.js';
+import {
+  DEFAULT_LLAMACPP_BASE_URL,
+  DEFAULT_QWEN_BASE_URL,
+  PROVIDERS,
+  PROVIDER_MODELS,
+  QWEN_ENDPOINTS,
+  providerLogoHtml,
+} from './constants.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -15,6 +22,47 @@ let needsProviderSetup = false;
 let selectedProvider = null;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const SETUP_SELECT_STYLE = 'width:100%;padding:11px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-family:var(--font-ui);font-size:14px;outline:none;';
+
+function normalizeLlamaCppBaseUrl(baseUrl = DEFAULT_LLAMACPP_BASE_URL) {
+  const trimmed = String(baseUrl || DEFAULT_LLAMACPP_BASE_URL).trim().replace(/\/+$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
+function normalizeQwenBaseUrl(baseUrl = DEFAULT_QWEN_BASE_URL) {
+  return String(baseUrl || DEFAULT_QWEN_BASE_URL).trim().replace(/\/+$/, '');
+}
+
+function qwenEndpointOptionsHtml(currentValue = DEFAULT_QWEN_BASE_URL) {
+  const normalizedCurrent = normalizeQwenBaseUrl(currentValue);
+  const options = [...QWEN_ENDPOINTS];
+  if (normalizedCurrent && !options.some(option => option.value === normalizedCurrent)) {
+    options.splice(options.length - 1, 0, { label: `Current custom (${normalizedCurrent})`, value: normalizedCurrent });
+  }
+  return options.map(option =>
+    `<option value="${option.value}"${option.value === normalizedCurrent ? ' selected' : ''}>${option.label}</option>`
+  ).join('');
+}
+
+function getQwenBaseUrlFromForm() {
+  const select = $('#qwen-base-url');
+  if (!select) return undefined;
+  if (select.value === 'CUSTOM_URL') {
+    return normalizeQwenBaseUrl($('#qwen-custom-base-url')?.value || DEFAULT_QWEN_BASE_URL);
+  }
+  return normalizeQwenBaseUrl(select.value);
+}
+
+function wireQwenEndpointSelect(container) {
+  const select = container.querySelector('#qwen-base-url');
+  const customInput = container.querySelector('#qwen-custom-base-url');
+  if (!select || !customInput) return;
+  const sync = () => {
+    customInput.style.display = select.value === 'CUSTOM_URL' ? 'block' : 'none';
+  };
+  select.addEventListener('change', sync);
+  sync();
+}
 
 // ── Step Navigation ──
 function goToStep(stepId) {
@@ -168,6 +216,7 @@ function renderProviderForm(providerId) {
                      providerId === 'mistral' ? 'Mistral API Key' :
                      providerId === 'deepseek' ? 'DeepSeek API Key' :
                      providerId === 'kimi' ? 'Moonshot API Key' :
+                     providerId === 'qwen' ? 'DashScope / Qwen API Key' :
                      'API Key';
     html += `
       <div class="setup-field">
@@ -176,6 +225,17 @@ function renderProviderForm(providerId) {
           <input type="password" id="provider-key" placeholder="Enter your API key">
           <button class="password-toggle" onclick="this.previousElementSibling.type = this.previousElementSibling.type === 'password' ? 'text' : 'password'" type="button">👁️</button>
         </div>
+      </div>`;
+  }
+
+  if (providerId === 'qwen') {
+    html += `
+      <div class="setup-field">
+        <label for="qwen-base-url">Qwen API Region</label>
+        <select id="qwen-base-url" style="${SETUP_SELECT_STYLE}">
+          ${qwenEndpointOptionsHtml(DEFAULT_QWEN_BASE_URL)}
+        </select>
+        <input type="text" id="qwen-custom-base-url" value="${DEFAULT_QWEN_BASE_URL}" placeholder="${DEFAULT_QWEN_BASE_URL}" style="display:none;margin-top:8px;">
       </div>`;
   }
   
@@ -193,7 +253,7 @@ function renderProviderForm(providerId) {
     html += `
       <div class="setup-field">
         <label for="provider-model">Model</label>
-        <select id="provider-model" style="width:100%;padding:11px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-family:var(--font-ui);font-size:14px;outline:none;">
+        <select id="provider-model" style="${SETUP_SELECT_STYLE}">
           ${models.map(m => `<option value="${m.value}">${m.label}</option>`).join('')}
         </select>
       </div>`;
@@ -209,7 +269,7 @@ function renderProviderForm(providerId) {
       <div class="setup-field">
         <label>Local Models</label>
         <button class="btn-setup" id="btn-detect-ollama" style="font-size:13px;padding:8px 16px;" type="button">🔍 Detect Models</button>
-        <select id="provider-model" style="display:none;width:100%;padding:11px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-family:var(--font-ui);font-size:14px;outline:none;margin-top:8px;"></select>
+        <select id="provider-model" style="display:none;${SETUP_SELECT_STYLE}margin-top:8px;"></select>
       </div>`;
   } else if (providerId === 'lmstudio') {
     html += `
@@ -220,7 +280,18 @@ function renderProviderForm(providerId) {
       <div class="setup-field">
         <label>Models</label>
         <button class="btn-setup" id="btn-detect-lmstudio" style="font-size:13px;padding:8px 16px;" type="button">🔍 Detect Models</button>
-        <select id="provider-model" style="display:none;width:100%;padding:11px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-family:var(--font-ui);font-size:14px;outline:none;margin-top:8px;"></select>
+        <select id="provider-model" style="display:none;${SETUP_SELECT_STYLE}margin-top:8px;"></select>
+      </div>`;
+  } else if (providerId === 'llamacpp') {
+    html += `
+      <div class="setup-field">
+        <label for="llamacpp-url">Base URL</label>
+        <input type="text" id="llamacpp-url" value="${DEFAULT_LLAMACPP_BASE_URL}" placeholder="${DEFAULT_LLAMACPP_BASE_URL}">
+      </div>
+      <div class="setup-field">
+        <label>Models</label>
+        <button class="btn-setup" id="btn-detect-llamacpp" style="font-size:13px;padding:8px 16px;" type="button">🔍 Detect Models</button>
+        <select id="provider-model" style="display:none;${SETUP_SELECT_STYLE}margin-top:8px;"></select>
       </div>`;
   }
 
@@ -229,7 +300,7 @@ function renderProviderForm(providerId) {
     html += `
       <div class="setup-field">
         <label>Prompt Caching</label>
-        <select id="provider-cache" style="width:100%;padding:11px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-family:var(--font-ui);font-size:14px;outline:none;">
+        <select id="provider-cache" style="${SETUP_SELECT_STYLE}">
           <option value="false">5 Minutes (Default — Cheaper)</option>
           <option value="true">1 Hour (Better for long sessions)</option>
         </select>
@@ -244,6 +315,12 @@ function renderProviderForm(providerId) {
   }
   if (providerId === 'lmstudio') {
     container.querySelector('#btn-detect-lmstudio')?.addEventListener('click', detectLMStudioModels);
+  }
+  if (providerId === 'llamacpp') {
+    container.querySelector('#btn-detect-llamacpp')?.addEventListener('click', detectLlamaCppModels);
+  }
+  if (providerId === 'qwen') {
+    wireQwenEndpointSelect(container);
   }
   
   // Attach OAuth login handler
@@ -307,6 +384,23 @@ async function detectLMStudioModels() {
   }
 }
 
+async function detectLlamaCppModels() {
+  const baseUrl = normalizeLlamaCppBaseUrl($('#llamacpp-url')?.value || DEFAULT_LLAMACPP_BASE_URL);
+  try {
+    const res = await fetch(`${baseUrl}/models`);
+    const data = await res.json();
+    const models = Array.isArray(data.data) ? data.data.map(m => m.id).filter(Boolean) : [];
+    const select = $('#provider-model');
+    select.style.display = 'block';
+    select.innerHTML = models.map(model => `<option value="${model}">${model}</option>`).join('');
+    if (models.length === 0) {
+      showToast('warning', 'No models found. Start llama-server with a GGUF model first.');
+    }
+  } catch (e) {
+    showToast('error', `Could not connect to llama.cpp at ${baseUrl}`);
+  }
+}
+
 // ── Save Provider Config via WebSocket ──
 function saveProviderConfig() {
   if (!selectedProvider) return;
@@ -339,6 +433,12 @@ function saveProviderConfig() {
   // LM Studio URL
   const lmUrl = $('#lmstudio-url');
   if (lmUrl) config.lmStudioBaseUrl = lmUrl.value.trim();
+
+  const llamaUrl = $('#llamacpp-url');
+  if (llamaUrl) config.llamaCppBaseUrl = normalizeLlamaCppBaseUrl(llamaUrl.value);
+
+  const qwenBaseUrl = getQwenBaseUrlFromForm();
+  if (qwenBaseUrl) config.qwenBaseUrl = qwenBaseUrl;
 
   // Claude cache
   const cacheSelect = $('#provider-cache');
